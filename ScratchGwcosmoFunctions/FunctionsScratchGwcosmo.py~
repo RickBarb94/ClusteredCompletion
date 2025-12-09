@@ -1,0 +1,714 @@
+import numpy as np
+import scipy 
+import sys
+import h5py
+import progressbar
+from scipy import special
+from scipy.stats import gaussian_kde
+from scipy.interpolate import splev, splrep
+from utilities.standard_cosmology import *
+from utilities.schechter_function import *
+from utilities.schechter_params import *
+from scipy.integrate import quad, dblquad
+
+#H0=np.linspace(40,100,100)
+
+
+def GaussianSigmad(x,mu, sigmaprop):
+    return 1/(sigmaprop*x*np.sqrt(2*np.pi))*np.exp(-0.5*(x-mu)**2/(sigmaprop*x)**2)#/norm
+
+def ztoZshell(z, zhist_edges):
+    return np.where(z>=zhist_edges)[0][-1]
+
+def ps_z_precompute(z):
+        rate="constant"
+        if rate == 'constant':
+            return 1.0
+        if rate == 'evolving':
+            return (1.0+z)**Lambda
+        
+def pD_inside_theoretic_precompute(H0, Catalog, dl_det, sigmaprop, linear_data_gen):
+    "This computes the pdet theoretically from eq 22 of hitchikers"
+    cosmo = fast_cosmology(Omega_m=Omega_m, linear=linear_data_gen)
+
+    den = np.zeros(len(H0))
+    zs = Catalog.z
+    ras = Catalog.ra
+    decs = Catalog.dec
+    ms = Catalog.m
+        
+    
+    for i in range(len(zs)):
+        # loop over random draws from galaxies
+        weight = 1.0
+        prob = pD_Heaviside_theoretic_precompute(zs[i],H0, dl_det, sigmaprop,cosmo).flatten()
+        deninner = prob*weight*ps_z_precompute(zs[i])
+        den += deninner
+
+    pDG = den/len(zs)
+
+    return pDG
+
+def pD_Heaviside_theoretic_precompute(z, H0, dl_det, sigmaprop, cosmo):
+        dl=cosmo.dl_zH0(z, H0)
+        erfvariable=(dl-dl_det)/(np.sqrt(2)*sigmaprop*dl) #should be this one instead of next one. Jon says no sqrt(2), shouldn't change regardless cause it's just overall factor
+        #erfvariable=(dl-dl_det)/(sigmaprop*dl) 
+        erfvariable*=-1 #There might be an inconsistency between hitchhiker and scipy in definition of error function, the minus sign produces something much closer to H0**3/gwcosmo
+        return 0.5 * (1 + special.erf(erfvariable))
+
+
+
+class likelihood(object):
+    """
+    A class to hold all the individual components of the posterior for H0 in 1D,
+    and methods to stitch them together in the right way.
+
+    Parameters
+    ----------
+    GW_data : hdf5 samples. Groups are the str of event numbers, datasets are ra_samps, dec and dl, and ra_inj, dec and dl
+    galaxy_catalog : FunctionsCatalog.galaxyCatalog object
+        The relevant galaxy catalog
+    Omega_m : float, optional
+        The matter fraction of the universe (default=0.25)
+    linear : bool, optional
+        Use linear cosmology (default=False)
+    weighted : bool, optional
+        Use luminosity weighting (default=False)
+    band : str, optional
+        specify B or K band catalog (and hence Schechter function parameters) (default='B')
+    modificationskypatch: if true, use the function to compute px_nG and pD_nG from the skypatch version, since the original ones cause trouble with FitActual and FitActualLinear schechter params
+    """
+
+    def __init__(self, EventNumber, GW_data, galaxy_catalog, pdet, precomputedinsidepdet=False, Omega_m=0.25, linear=False, weighted=False, weights=None, assumed_band='B', samplestype='gaussian', rate='constant', gwcosmopdet=False, sigmaprop=0.2, dl_det=200, whole_sky_cat=True, weightedcatalog=False, directpx=False):
+        self.precomputedinsidepdet=precomputedinsidepdet
+        self.pdet = pdet
+        self.Omega_m = Omega_m
+        self.linear = linear
+        self.weighted = weighted
+        self.weights = weights #should be a list of 2 arrays, one with the z_hist_edges and one with the weights if custom. Otherwise None
+        self.assumed_band = assumed_band
+        sp = SchechterParams(self.assumed_band)
+        self.alpha = sp.alpha
+        self.Mstar_obs = sp.Mstar
+        self.Mobs_min = sp.Mmin
+        self.Mobs_max = sp.Mmax
+        print("assumed band: ", assumed_band, " params ", self.alpha, self.Mstar_obs, self.Mobs_min, self.Mobs_max)
+        self.rate=rate
+        self.gwcosmopdet = gwcosmopdet
+        self.dl_det=dl_det
+        self.sigmaprop=sigmaprop
+        self.weightedcatalog=weightedcatalog
+        self.directpx=directpx
+
+        self.allz = galaxy_catalog.z
+        self.allra = galaxy_catalog.ra
+        self.alldec = galaxy_catalog.dec
+        self.allm = galaxy_catalog.m
+
+        if self.weightedcatalog==True:
+            self.allcatalogweights = galaxy_catalog.weights
+        self.nGal = len(self.allz)
+
+        if galaxy_catalog is not None:
+            self.galaxy_catalog = galaxy_catalog #add hdf5 extraction and mth calculation
+            self.mth = galaxy_catalog.mth()
+
+        self.whole_sky_cat=whole_sky_cat #assume that the catalog covers the whole sky? Shouldn't make much of a difference
+        if self.whole_sky_cat == False:
+        
+            self.ra_min = 0
+            self.ra_max = np.pi/2
+            self.dec_min = 0
+            self.dec_max = np.pi/2
+            self.zcut = 0.1 # TODO: replace with something read in from the catalogue itself (radec_lim), also check its usage. In any case only used for out of catalog
+        
+            def skynorm(dec,ra):
+                return np.cos(dec)
+            self.catalog_fraction = dblquad(skynorm,self.ra_min,self.ra_max,lambda x: self.dec_min,lambda x: self.dec_max,epsabs=0,epsrel=1.49e-4)[0]/(4.*np.pi)
+            self.rest_fraction = 1-self.catalog_fraction
+            print('This catalog covers {}% of the full sky'.format(self.catalog_fraction*100))
+
+        elif self.whole_sky_cat==True:
+            self.ra_min = 0.0
+            self.ra_max = np.pi*2.0
+            self.dec_min = -np.pi/2.0
+            self.dec_max = np.pi/2.0
+            self.zcut = 0.1 # TODO: replace with something read in from the catalogue itself (radec_lim), also check its usage. In any case only used for out of catalog
+        
+        else:
+            print("WRONG whole_sky_cat. Please insert a valid option!")
+            sys.exit()
+
+        if GW_data is not None:
+            #dl
+            samps=h5py.File(GW_data, 'r')
+
+            dlssamps=samps[EventNumber]["dl_samps"][:]
+
+            ##this next bit is used only for direct px_inside calculation, "skipping" the samples
+            if self.directpx=="AlmostTrue":
+                histy, binedges=np.histogram(dlssamps, density=True, bins=100) #get xs and ys from histogram to use to fit gaussiandsigmad function extracting dl_gw
+                histx=np.array([(binedges[i]+binedges[i+1])/2 for i in range(len(histy))])
+                def GaussianSigmadtofit(x, mu):
+                    return GaussianSigmad(x, mu, sigmaprop=self.sigmaprop)
+                self.dl_gw=scipy.optimize.curve_fit(GaussianSigmadtofit, histx, histy, p0=np.median(dlssamps))[0] #now I have dl_gw and can proceed with calculation
+                print("Median ", np.median(dlssamps), " Fit gw dist ", self.dl_gw, " difference perc ", abs(self.dl_gw-np.median(dlssamps))/self.dl_gw)
+            elif self.directpx==True:
+                self.dl_gw=samps[EventNumber]["dl_gw"][()]
+            distkernel=gaussian_kde(dlssamps)
+            distmin = 0.5*np.amin(dlssamps)
+            distmax = 2.0*np.amax(dlssamps)
+            dl_array = np.linspace(distmin, distmax, 500)
+            vals = distkernel(dl_array)
+            self.tempdl = splrep(dl_array,vals)
+            #ra
+            rasamps=samps[EventNumber]["ra_samps"][:]
+            decsamps=samps[EventNumber]["dec_samps"][:]
+            #radecsamps=np.array(list(zip(rasamps, decsamps)))
+            #print(radecsamps)
+            #radeckernel=gaussian_kde(radecsamps)
+            
+            
+
+            ra_array = np.linspace(self.ra_min, self.ra_max, 500)
+            if any(rasamps)>0:
+                rakernel=gaussian_kde(rasamps)
+                ravals = rakernel(ra_array)
+            else:
+                ravals=np.zeros(len(ra_array))
+            self.tempra = splrep(ra_array,ravals)
+
+            
+
+            dec_array = np.linspace(self.dec_min, self.dec_max, 500)
+            if any(decsamps)>0:
+
+                deckernel=gaussian_kde(decsamps)
+                decvals = deckernel(dec_array)
+            else:
+                decvals=np.zeros(len(dec_array))
+            self.tempdec = splrep(dec_array,decvals)
+            self.tempsky = self.px_radec_independent(self.allra, self.alldec)
+            if self.whole_sky_cat==True:
+                rafaststd=np.std(rasamps)
+                decfaststd=np.std(decsamps)
+                print(rafaststd, decfaststd)
+                print("Minimum ra would be ", min(rasamps)-rafaststd)
+                print("Maximum ra would be ", max(rasamps)+rafaststd)
+                print("Minimum dec would be ", min(decsamps)-decfaststd)
+                print("Maximum dec would be ", max(decsamps)+decfaststd)
+                self.rafastmin=max(0, min(rasamps)-rafaststd) #define a min and max of ras so, when looping through galaxies in the inside catalog component, I can quickly exclude galaxies that are way out of bounds.  
+                self.rafastmax=min(2*np.pi, max(rasamps)+rafaststd) #This probably means that when I have an event across the boundary (ra ~0 = 6.28) this limits don't do anything, but I'll still be faster in most of the other ones
+                self.decfastmin=max(-np.pi/2, min(decsamps)-decfaststd) #same thing for dec, here there shouldn't be issues with boundary
+                self.decfastmax=min(np.pi/2, max(decsamps)+decfaststd) 
+                print("Event center ra ", np.mean(rasamps), " limits ", self.rafastmin, self.rafastmax)
+                print("Event center dec ", np.mean(decsamps), " limits ", self.decfastmin, self.decfastmax)
+            else:
+                self.rafastmin=self.ra_min
+                self.rafastmax=self.ra_max
+                self.decfastmin=self.dec_min
+                self.decfastmax=self.dec_max 
+                
+        self.pDG = None
+        self.pGD = None
+        self.pnGD = None
+        self.pDnG = None
+
+        # Note that zmax is an artificial limit that
+        # should be well above any redshift value that could
+        # impact the results for the considered H0 values.
+
+        
+
+        self.zmax = 10.
+        
+        self.zprior = redshift_prior(Omega_m=self.Omega_m, linear=self.linear)
+        self.cosmo = fast_cosmology(Omega_m=self.Omega_m, linear=self.linear)
+
+    def px_dl(self, dl):
+        """
+        Returns a probability for a given distance dl
+        from the interpolated function.
+        """
+        return splev(dl, self.tempdl, ext=3)
+    
+    def px_dl_direct(self, dl):
+        "computed px_dl directly, fitting the samples to the gaussian sigma d, using the anyway assumed sigmadprop, to extract dl_gw. Uses gaussian sigmad to evaluate probability"
+        return GaussianSigmad(x=dl, mu=self.dl_gw, sigmaprop=self.sigmaprop)
+    
+    def px_ra(self, ra):
+        """
+        Returns a probability for a given ra
+        from the interpolated function.
+        """
+        return splev(ra, self.tempra, ext=3)
+    
+    def px_dec(self, dec):
+        """
+        Returns a probability for a given dec
+        from the interpolated function.
+        """
+        return splev(dec, self.tempdec, ext=3)
+    
+    def px_radec_independent(self, ra, dec):
+        """
+        Returns a probability for a given ra dec
+        from the interpolated functions, assuming the correlation is zero
+        """
+        return self.px_ra(ra)*self.px_dec(dec)
+    
+    def ps_z(self, z):
+        if self.rate == 'constant':
+            return 1.0
+        if self.rate == 'evolving':
+            return (1.0+z)**self.Lambda
+        
+    def likelihood(self,H0,complete=False,population=False, dimensions=3):
+        """
+        The likelihood for a single event
+        This corresponds to Eq 3 (statistical) or Eq 6 (counterpart) in the doc, depending on parameter choices.
+        
+        Parameters
+        ----------
+        H0 : float or array_like
+            Hubble constant value(s) in kms-1Mpc-1
+        complete : bool, optional
+            Is the galaxy catalog complete to all relevant distances/redshifts? (default=False)
+           
+        Returns
+        -------
+        float or array_like
+            p(x|H0,D)
+        """        
+        if population==True:
+            pxG = self.px_H0_empty(H0)
+            self.pDG = self.pD_H0_empty(H0)
+            likelihood = pxG/self.pDG
+
+        else:
+            if dimensions==1:
+                pxG = self.px_inside_1D(H0)
+            elif dimensions==3:
+                pxG = self.px_inside_3D(H0, direct=self.directpx)
+            if self.pDG==None:
+                if self.precomputedinsidepdet==True:
+                    self.pDG = self.Read_precomputed_insidepdet(H0)
+                elif self.gwcosmopdet==True:
+                    self.pDG = self.pD_inside_gwcosmo(H0)
+                elif self.gwcosmopdet=='cube':
+                    self.pDG = self.pD_H0cube(H0)
+                elif self.gwcosmopdet=="theoretic":
+                    self.pDG = self.pD_inside_theoretic(H0)
+                elif self.gwcosmopdet=="ones":
+                    self.pDG=np.ones(len(pxG))
+                else:
+                    print("Pdet chosen not supported")
+            
+            if complete==True:
+                likelihood = pxG/self.pDG # Eq 3 with p(G|H0,D)=1 and p(bar{G}|H0,D)=0
+            else:
+                if self.pGD==None:
+                    self.pGD = self.pG(H0)
+                if self.pnGD==None:
+                    self.pnGD = self.pnG(H0)
+                if self.pDnG==None:
+                    self.pDnG = self.pD_outside_3D(H0)
+                    
+                pxnG = self.px_outside_3D(H0)
+
+                likelihood = self.pGD*(pxG/self.pDG) + self.pnGD*(pxnG/self.pDnG) # Eq 3
+
+        if (complete==True) or (population==True):
+            self.pGD = np.ones(len(H0))
+            self.pnGD = np.zeros(len(H0))
+            pxnG = np.zeros(len(H0))
+            self.pDnG = np.ones(len(H0))
+
+        #print(min(likelihood),min(pxG),min(self.pDG),min(self.pGD), min(pxnG),min(self.pDnG),min(self.pnGD))
+        return likelihood,pxG,self.pDG,self.pGD, pxnG,self.pDnG,self.pnGD
+        
+    def px_inside_3D(self, H0, direct=False):
+        num = np.zeros(len(H0))
+
+        """prob_sorted = np.sort(self.skymap.prob)[::-1]
+        prob_sorted_cum = np.cumsum(prob_sorted)
+        # find index of array which bounds the self.area confidence interval
+        idx = np.searchsorted(prob_sorted_cum, self.area)
+        if idx==len(prob_sorted_cum):
+            idx=-1
+        minskypdf = prob_sorted[idx]*self.skymap.npix
+        count = 0
+    
+        #find galaxies within the bounds of the GW event
+        tempsky = self.skyprob(self.allra, self.alldec)*self.skymap.npix
+        ind = np.argwhere(tempsky >= minskypdf)
+        tempsky = tempsky[ind].flatten()
+        zs = self.allz[ind].flatten()
+        ras = self.allra[ind].flatten()
+        decs = self.alldec[ind].flatten()
+        ms = self.allm[ind].flatten()
+        sigzs = self.allsigmaz[ind].flatten()"""
+        
+        
+        zs = self.allz
+        ms = self.allm
+        ras = self.allra
+        decs = self.alldec
+        #tempsky=np.ones(len(zs))
+
+        if self.weighted:
+            mlim = np.percentile(np.sort(ms),0.01) # more draws for galaxies in brightest 0.01 percent
+        else:
+            mlim = 1.0
+        
+        bar = progressbar.ProgressBar()
+        print("Calculating p(x|H0,G) in 3D")
+        # loop over galaxies
+        
+        for i in bar(range(len(zs))):
+            if ras[i]>self.rafastmin and ras[i]<self.rafastmax and decs[i]>self.decfastmin and decs[i]<self.decfastmax:
+                #print("approved", ras[i], decs[i])
+                numinner=np.zeros(len(H0))
+                if self.weightedcatalog==True:
+                    weight = self.allcatalogweights[i]
+                elif self.weighted=="luminosity":
+                    weight = L_mdl(ms[i], self.cosmo.dl_zH0(zs[i], H0))
+                elif self.weighted=="custom":
+                    zindex=ztoZshell(zs[i], self.weights[0])
+                    weight = self.weights[1][zindex]
+                elif self.weighted=="custom_interp":
+                    weight = splev(zs[i], self.weights, ext=3)
+                else:
+                    weight = 1.0
+                if direct==False:
+                    tempdist = self.px_dl(self.cosmo.dl_zH0(zs[i], H0))#/self.cosmo.dl_zH0(zs[i], H0)**2 # remove dl^2 prior from samples but I'm creating the likelihood myself so probably not needed
+                elif direct==True:
+                    tempdist = self.px_dl_direct(self.cosmo.dl_zH0(zs[i], H0))#/self.cosmo.dl_zH0(zs[i], H0)**2 # remove dl^2 prior from samples but I'm creating the likelihood myself so probably not needed
+                
+                numinner = tempdist*self.tempsky[i]*weight*self.ps_z(zs[i])#tempsky contains the rad and dec infos
+                num += numinner#sum contributions
+            #else:
+            #    print("skipped", ras[i], decs[i])
+
+        numnorm = num/self.nGal#normalize
+
+        return numnorm
+
+    def px_inside_1D(self, H0):
+        """
+        Returns p(x|H0,G) for given values of H0.
+        The likelihood of the GW data given H0 and conditioned on
+        the source being inside the galaxy catalog. 1D version
+
+        Parameters
+        ----------
+        H0 : float or array_like
+            Hubble constant value(s) in kms-1Mpc-1
+
+        Returns
+        -------
+        float or array_like
+            p(x|H0,G)
+        """
+        num = np.zeros(len(H0))
+
+        """
+        ind = np.argwhere(tempsky >= 0.)
+        tempsky = tempsky[ind].flatten()
+        zs = self.allz[ind].flatten()
+        ras = self.allra[ind].flatten()
+        decs = self.alldec[ind].flatten()
+        ms = self.allm[ind].flatten()
+        """
+        zs = self.allz
+        ras = self.allra
+        decs = self.alldec
+        ms = self.allm
+        tempsky=np.ones(len(zs)) #this would be the probability due to skymap but being 1d doesn't matter
+        
+        bar = progressbar.ProgressBar()
+        print("Calculating p(x|H0,G)")
+        # loop over galaxies
+        for i in bar(range(len(zs))):
+            
+            if self.weightedcatalog==True:
+                weight = self.allcatalogweights[i]
+            elif self.weighted=="luminosity":
+                weight = L_mdl(ms[i], self.cosmo.dl_zH0(zs[i], H0))
+            elif self.weighted=="custom":
+                zindex=ztoZshell(zs[i], self.weights[0])
+                weight = self.weights[1][zindex]
+            elif self.weighted=="custom_interp":
+                weight = splev(zs[i], self.weights, ext=3)
+            
+            else:
+                weight = 1.0
+            tempdist = self.px_dl(self.cosmo.dl_zH0(zs[i], H0))#/self.cosmo.dl_zH0(zs[i], H0)**2 # remove dl^2 prior from samples, but I'm creating the likelihood myself so probably not needed
+            numinner = tempdist*tempsky[i]*weight*self.ps_z(zs[i])
+            num += numinner
+        
+
+        numnorm = num/self.nGal
+            
+        return numnorm
+
+    def Read_precomputed_insidepdet(self, H0):
+        print("Reading pdet from ", self.pdet)
+        pDG=np.loadtxt(self.pdet)
+        return pDG
+
+    def pD_inside_gwcosmo(self,H0):
+        #SAME AS FOR 3D
+        """
+        Returns p(D|H0,G) (the normalising factor for px_H0G).
+        This corresponds to the denominator of Eq 12 in the methods doc.
+        The probability of detection as a function of H0, conditioned on the source being inside the galaxy catalog
+        
+        Parameters
+        ----------
+        H0 : float or array_like
+            Hubble constant value(s) in kms-1Mpc-1
+            
+        Returns
+        -------
+        float or array_like
+            p(D|H0,G)        
+        """     
+        den = np.zeros(len(H0))
+        zs = self.allz
+        ras = self.allra
+        decs = self.alldec
+        ms = self.allm
+        if self.weighted:
+            mlim = np.percentile(np.sort(self.allm),0.01) # more draws for galaxies in brightest 0.01 percent
+        else:
+            mlim = 1.0
+            
+        bar = progressbar.ProgressBar()
+        print("Calculating p(D|H0,G)")
+        # loop over galaxies
+        for i in bar(range(len(zs))):
+            # loop over random draws from galaxies
+            if self.weightedcatalog==True:
+                weight = self.allcatalogweights[i]
+            elif self.weighted=="luminosity":
+                weight = L_mdl(ms[i], self.cosmo.dl_zH0(zs[i], H0))
+            elif self.weighted=="custom":
+                zindex=ztoZshell(zs[i], self.weights[0])
+                weight = self.weights[1][zindex]
+            elif self.weighted=="custom_interp":
+                weight = splev(zs[i], self.weights, ext=3)
+            else:
+                weight = 1.0
+            prob = self.pdet.pD_zH0_eval(zs[i],H0).flatten()
+            deninner = prob*weight*self.ps_z(zs[i])
+            den += deninner
+
+        self.pDG = den/self.nGal
+
+        return self.pDG
+    
+    def pD_inside_theoretic(self,H0):
+        "This computes the pdet theoretically from eq 22 of hitchikers"
+        den = np.zeros(len(H0))
+        zs = self.allz
+        ras = self.allra
+        decs = self.alldec
+        ms = self.allm
+        if self.weighted:
+            mlim = np.percentile(np.sort(self.allm),0.01) # more draws for galaxies in brightest 0.01 percent
+        else:
+            mlim = 1.0
+            
+        bar = progressbar.ProgressBar()
+        print("Calculating p(D|H0,G) using theoretic Heaviside step function (Eq 22)")
+        # loop over galaxies
+        for i in bar(range(len(zs))):
+            # loop over random draws from galaxies
+            if self.weightedcatalog==True:
+                weight = self.allcatalogweights[i]
+            elif self.weighted=="luminosity":
+                weight = L_mdl(ms[i], self.cosmo.dl_zH0(zs[i], H0))
+            elif self.weighted=="custom":
+                zindex=ztoZshell(zs[i], self.weights[0])
+                weight = self.weights[1][zindex]
+            elif self.weighted=="custom_interp":
+                weight = splev(zs[i], self.weights, ext=3)
+            else:
+                weight = 1.0
+            prob = self.pD_Heaviside_theoretic(zs[i],H0).flatten()
+            deninner = prob*weight*self.ps_z(zs[i])
+            den += deninner
+
+        self.pDG = den/self.nGal
+
+        return self.pDG
+    
+    def pD_H0cube(self, H0):
+        # super simple pdet that return H0**3. This should be the case for an empty catalog
+        print("Calculating p(D|H0,G) with a simple H0**3")
+        
+        return H0**3
+
+    def pD_Heaviside_theoretic(self, z, H0):
+        dl=self.cosmo.dl_zH0(z, H0)
+        erfvariable=(dl-self.dl_det)/(np.sqrt(2)*self.sigmaprop*dl) #should be this one instead of next one. Jon says no sqrt(2), shouldn't change regardless cause it's just overall factor
+        #erfvariable=(dl-dl_det)/(sigmaprop*dl) 
+        erfvariable*=-1 #There might be an inconsistency between hitchhiker and scipy in definition of error function, the minus sign produces something much closer to H0**3/gwcosmo
+        return 0.5 * (1 + special.erf(erfvariable))
+    
+
+    def pG(self,H0):
+        
+        # Warning - this integral misbehaves for small values of H0 (<25 kms-1Mpc-1).  TODO: fix this.
+        num = np.zeros(len(H0)) 
+        den = np.zeros(len(H0))
+        bar = progressbar.ProgressBar()
+        print("Calculating p(G|H0,D)")
+        for i in bar(range(len(H0))):
+            def I(M,z):
+                if self.gwcosmopdet==True:
+                    temp = SchechterMagFunction(H0=H0[i],Mstar_obs=self.Mstar_obs,alpha=self.alpha)(M)*self.pdet.pD_zH0_eval(z,H0[i])*self.zprior(z)*self.ps_z(z)
+                elif self.gwcosmopdet=='cube':
+                    temp = SchechterMagFunction(H0=H0[i],Mstar_obs=self.Mstar_obs,alpha=self.alpha)(M)*H0[i]**3*self.zprior(z)*self.ps_z(z)
+                elif self.gwcosmopdet=="theoretic":
+                    temp = SchechterMagFunction(H0=H0[i],Mstar_obs=self.Mstar_obs,alpha=self.alpha)(M)*self.pD_Heaviside_theoretic(z,H0[i])*self.zprior(z)*self.ps_z(z)
+                elif self.gwcosmopdet=="ones":
+                    temp = SchechterMagFunction(H0=H0[i],Mstar_obs=self.Mstar_obs,alpha=self.alpha)(M)*self.zprior(z)*self.ps_z(z)
+                #This stuff is for basic pdet in gwcosmo
+                #if self.basic:
+                #    temp = SchechterMagFunction(H0=H0[i],Mstar_obs=self.Mstar_obs,alpha=self.alpha)(M)*self.pdet.pD_dl_eval_basic(self.cosmo.dl_zH0(z,H0[i]))*self.zprior(z)*self.ps_z(z)
+                #else:
+                #    temp = SchechterMagFunction(H0=H0[i],Mstar_obs=self.Mstar_obs,alpha=self.alpha)(M)*self.pdet.pD_zH0_eval(z,H0[i])*self.zprior(z)*self.ps_z(z)
+                if self.weighted:
+                    return temp*L_M(M)
+                else:
+                    return temp
+            # Mmin and Mmax currently corresponding to 10L* and 0.001L* respectively, to correspond with MDC
+            # Will want to change in future.
+            # TODO: test how sensitive this result is to changing Mmin and Mmax.
+            Mmin = M_Mobs(H0[i],self.Mobs_min)
+            Mmax = M_Mobs(H0[i],self.Mobs_max)
+            #print("Obs Mmin, Mmax", self.Mobs_min, self.Mobs_max)
+            #print("Mmin, Mmax, M_mdl0, M_mdlmax", Mmin, Mmax, M_mdl(self.mth,self.cosmo.dl_zH0(0,H0[i])), M_mdl(self.mth,self.cosmo.dl_zH0(self.zcut,H0[i])))
+            #print("zcut, zmax", self.zcut, self.zmax)
+            #sys.exit()
+            #MODIFIED num[i] copying from gwcosmo013
+            num[i] = dblquad(I,0,self.zcut,lambda x: Mmin,lambda x: min(max(M_mdl(self.mth,self.cosmo.dl_zH0(x,H0[i])),Mmin),Mmax),epsabs=0,epsrel=1.49e-4)[0]
+            #num[i] = dblquad(I,0,self.zcut,lambda x: Mmin,lambda x: M_mdl(self.mth,self.cosmo.dl_zH0(x,H0[i])),epsabs=0,epsrel=1.49e-4)[0]
+            den[i] = dblquad(I,0,self.zmax,lambda x: Mmin,lambda x: Mmax,epsabs=0,epsrel=1.49e-4)[0]
+
+        self.pGD = num/den
+        #print("PG NUM : ", num)
+        #print("PG DEN : ", den)
+        return self.pGD    
+
+
+    def pnG(self,H0):
+        
+        if all(self.pGD)==None:
+            self.pGD = self.pG(H0)
+        self.pnGD = 1.0 - self.pGD
+        return self.pnGD
+       
+        
+    def px_outside_3D(self,H0):
+        
+        num = np.zeros(len(H0))
+
+        bar = progressbar.ProgressBar()
+        print("Calculating p(x|H0,bar{G})")
+        for i in bar(range(len(H0))):
+            Mmin = M_Mobs(H0[i],self.Mobs_min)
+            Mmax = M_Mobs(H0[i],self.Mobs_max)
+            """if self.modificationskypatch==False: #there are two versions of this, I think one before skypatch modification in gwcosmo (not mine) and one after. Probably the one after is the correct one
+                def Inum(M,z):
+                    temp = self.px_dl(self.cosmo.dl_zH0(z,H0[i]))*self.zprior(z)*SchechterMagFunction(H0=H0[i],Mstar_obs=self.Mstar_obs,alpha=self.alpha)(M)*self.ps_z(z)/self.cosmo.dl_zH0(z,H0[i])**2 # remove dl^2 prior from samples
+                    if self.weighted:
+                        return temp*L_M(M)
+                    else:
+                        return temp
+
+                
+                if i==0 or i==(len(H0)-1):
+                    print("H0, Mmdlz0, Mmdlzcut, Mmax ", H0[i], M_mdl(self.mth,self.cosmo.dl_zH0(0,H0[i])), M_mdl(self.mth,self.cosmo.dl_zH0(self.zcut,H0[i])), Mmax)
+            
+                if allsky == True:
+                    distnum[i] = dblquad(Inum,0.0,self.zcut, lambda x: M_mdl(self.mth,self.cosmo.dl_zH0(x,H0[i])), lambda x: Mmax,epsabs=0,epsrel=1.49e-4)[0] \
+                            + dblquad(Inum,self.zcut,self.zmax, lambda x: Mmin, lambda x: Mmax,epsabs=0,epsrel=1.49e-4)[0]
+                else:
+                    distnum[i] = dblquad(Inum,0.0,self.zmax,lambda x: Mmin,lambda x: Mmax,epsabs=0,epsrel=1.49e-4)[0]
+            if self.modificationskypatch==True:"""
+                
+            def Inum(z,M):
+                temp = self.px_dl(self.cosmo.dl_zH0(z,H0[i]))*self.zprior(z)*SchechterMagFunction(H0=H0[i],Mstar_obs=self.Mstar_obs,alpha=self.alpha)(M)*self.ps_z(z)/self.cosmo.dl_zH0(z,H0[i])**2 # remove dl^2 prior from samples
+                if self.weighted:
+                    #if self.zweight_outcat:
+                    #    return temp*L_M(M)*self.Zweightfunc(z)
+                    #else:
+                    return temp*L_M(M)
+                else:
+                    #if self.zweight_outcat:
+                    #    return temp*self.Zweightfunc(z)
+                    #else:
+                    return temp
+            #if i==0 or i==(len(H0)-1):
+            #    print("H0, Mmdlz0, Mmdlzcut, Mmax ", H0[i], M_mdl(self.mth,self.cosmo.dl_zH0(0,H0[i])), M_mdl(self.mth,self.cosmo.dl_zH0(self.zcut,H0[i])), Mmax)
+            #    print("H0, zdlMmin, zdlMmax, zmax ", H0[i], z_dlH0(dl_mM(self.mth,Mmin),H0[i],linear=self.linear), z_dlH0(dl_mM(self.mth,Mmax),H0[i],linear=self.linear), self.zmax)
+            num[i] = dblquad(Inum,Mmin,Mmax,lambda x: z_dlH0(dl_mM(self.mth,x),H0[i],linear=self.linear),lambda x: self.zmax,epsabs=0,epsrel=1.49e-4)[0]
+    
+        return num
+
+    def pD_outside_3D(self,H0):
+        
+        # TODO: same fixes as for pG_H0D 
+        den = np.zeros(len(H0))
+        
+        def skynorm(dec,ra):
+            return np.cos(dec)
+                
+        norm = dblquad(skynorm,self.ra_min,self.ra_max,lambda x: self.dec_min,lambda x: self.dec_max,epsabs=0,epsrel=1.49e-4)[0]/(4.*np.pi)
+        #print("Sky stuff: ramin, ramax, decmin, decmax, norm : ", self.ra_min, self.ra_max, self.dec_min, self.dec_max, norm)
+        bar = progressbar.ProgressBar()
+        print("Calculating p(D|H0,bar{G})")
+        for i in bar(range(len(H0))):
+            Mmin = M_Mobs(H0[i],self.Mobs_min)
+            Mmax = M_Mobs(H0[i],self.Mobs_max)
+            
+            """if self.modificationskypatch==False:#same as
+                def I(M,z):
+                    if self.basic:
+                        temp = SchechterMagFunction(H0=H0[i],Mstar_obs=self.Mstar_obs,alpha=self.alpha)(M)*self.pdet.pD_dl_eval_basic(self.cosmo.dl_zH0(z,H0[i]))*self.zprior(z)*self.ps_z(z)
+                    else:
+                        temp = SchechterMagFunction(H0=H0[i],Mstar_obs=self.Mstar_obs,alpha=self.alpha)(M)*self.pdet.pD_zH0_eval(z,H0[i])*self.zprior(z)*self.ps_z(z)
+                    if self.weighted:
+                        return temp*L_M(M)
+                    else:
+                        return temp
+
+                if allsky == True:
+                    den[i] = dblquad(I,0.0,self.zcut, lambda x: M_mdl(self.mth,self.cosmo.dl_zH0(x,H0[i])), lambda x: Mmax,epsabs=0,epsrel=1.49e-4)[0] \
+                        + dblquad(I,self.zcut,self.zmax, lambda x: Mmin, lambda x: Mmax,epsabs=0,epsrel=1.49e-4)[0]
+                else:
+                    den[i] = dblquad(I,0.0,self.zmax,lambda x: Mmin,lambda x: Mmax,epsabs=0,epsrel=1.49e-4)[0]
+            if self.modificationskypatch==True:"""
+            def Iden(z,M):
+                if self.gwcosmopdet==True:
+                    temp = SchechterMagFunction(H0=H0[i],Mstar_obs=self.Mstar_obs,alpha=self.alpha)(M)*self.pdet.pD_zH0_eval(z,H0[i])*self.zprior(z)*self.ps_z(z)
+                elif self.gwcosmopdet=='cube':
+                    temp = SchechterMagFunction(H0=H0[i],Mstar_obs=self.Mstar_obs,alpha=self.alpha)(M)*H0[i]**3*self.zprior(z)*self.ps_z(z)
+                elif self.gwcosmopdet=="theoretic":
+                    temp = SchechterMagFunction(H0=H0[i],Mstar_obs=self.Mstar_obs,alpha=self.alpha)(M)*self.pD_Heaviside_theoretic(z,H0[i])*self.zprior(z)*self.ps_z(z)
+                elif self.gwcosmopdet=="ones":
+                    temp = SchechterMagFunction(H0=H0[i],Mstar_obs=self.Mstar_obs,alpha=self.alpha)(M)*self.zprior(z)*self.ps_z(z)
+            
+                if self.weighted:
+                    return temp*L_M(M)
+                else:
+                    return temp
+            den[i] = dblquad(Iden,Mmin,Mmax,lambda x: z_dlH0(dl_mM(self.mth,x),H0[i],linear=self.linear),lambda x: self.zmax,epsabs=0,epsrel=1.49e-4)[0] #check whether to use this style of integral or the one in modificationskypatch=False/pG
+        if self.whole_sky_cat == True: #TODO check what's up with this allsky thing, should be whole_cat but not sure
+            pDnG = den*norm
+        else:
+            pDnG = den*(1.-norm)
+        return pDnG
