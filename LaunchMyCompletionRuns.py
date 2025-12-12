@@ -28,6 +28,7 @@ input = int(sys.argv[1])
 
 SetupAndEvents=False #if true, the code generates only the events and prepares the directories. Useful for running multiple realizations in parallel on a cluster using the same set of events.
 humantitle="ClusteredCompletion_"
+humantitle="Justatest_"
 ####################Cosmo params####################################
 linear=True
 Omega_m=0.25
@@ -264,11 +265,6 @@ for dl_det_threshold in dldets:
     pathtoprecomputedinsidepdet=CorrectedPdetsDirec+"insidepdet_zmaxass"+str(zmaxtouse)+"_"+CatalogCorrectedName[len(CorrectedCatalogsdirec):-5]+"_lin-"+str(linear_data_gen)+"_dl-distr-"+dl_distr+"_dldetused"+str(dl_det_threshold)+"_sigmaprop"+str(sigma_dl_prop_ass)+"_"+str(H0min)+"-"+str(H0max)+"-len"+str(len(H0arr))+".txt"
     insidepdet=PrecomputePdetOnLaunch(precomputeclass=precomputeclass, pdettype="inside", pathtoprecomputedpdet=pathtoprecomputedinsidepdet, saveprecomputes=saveprecomputes, smoothedcatalog=smoothedcatalog, emptycatalog=emptycatalog, JonLikelihood=JonStyleLikelihood)
     print("inside pdet corr ", np.loadtxt(insidepdet))
-    #these next 3 lines is just a test they are useless
-    precomputeclassfull=PrecomputingClass(galaxy_catalog=CatalogFull, CatalogFull=CatalogFull, dl_det=dl_det_threshold, Omega_m=Omega_m, linear=linear, assumed_band=assumed_band, zmax=zmaxtouse, sigmaprop=sigma_dl_prop_ass, weightedcat=weightedcatalog, zpriortouse=zpriortouse, dl_distr=dl_distr, pdettype=pdetstyle, weighted=weighted)
-    pathtoprecomputedinsidepdetfull=CorrectedPdetsDirec+"FULLTESTinsidepdet_zmaxass"+str(zmaxtouse)+"_"+CatalogCorrectedName[len(CorrectedCatalogsdirec):-5]+"_lin-"+str(linear_data_gen)+"_dl-distr-"+dl_distr+"_dldetused"+str(dl_det_threshold)+"_sigmaprop"+str(sigma_dl_prop_ass)+"_"+str(H0min)+"-"+str(H0max)+"-len"+str(len(H0arr))+".txt"
-    insidepdetfull=PrecomputePdetOnLaunch(precomputeclass=precomputeclass, pdettype="inside", pathtoprecomputedpdet=pathtoprecomputedinsidepdetfull, saveprecomputes=saveprecomputes, smoothedcatalog=smoothedcatalog, emptycatalog=emptycatalog, JonLikelihood=JonStyleLikelihood)
-    print("inside pdet full ", np.loadtxt(insidepdetfull))
 
 outsidepdet=None
 pGpdet=None
@@ -289,7 +285,7 @@ for dl_det_threshold in dldets:
     likelihoodnormlist=[]
     datastodumplist=[]
     EventsFiletouse=EventsFile.replace("_dldet-"+str(dldets[-1]), "_dldet-"+str(dl_det_threshold)) #the EventsFile variable from the event generating bit will be set to last det threshold (usually 400), here I change it so everyone has different det threshold
-    
+    insidepdettouse=insidepdet.replace("_dldetused"+str(dldets[-1]), "_dldetused"+str(dl_det_threshold))
     CosmoAnalDirec=CosmoAnalParentDirec+CatalogCorrectedName[len(CorrectedCatalogsdirec):-5]+"_dldet"+str(dl_det_threshold)+"/"
     if os.path.exists(CosmoAnalDirec)==False:
         os.mkdir(CosmoAnalDirec)
@@ -299,7 +295,7 @@ for dl_det_threshold in dldets:
         print("EVENT "+str(EventNumber))
         EventNumber=str(EventNumber)
         if JonStyleLikelihood==False:
-            likelihoodclass=likelihood(EventNumber=EventNumber, GW_data=EventsFiletouse, galaxy_catalog=CatalogCorr, precomputedinsidepdet=precomputedinsidepdet, precomputedoutsidepdet=precomputedoutsidepdet, precomputedpGpdet=precomputedpGpdet, insidepdet=insidepdet, outsidepdet=outsidepdet, pGpdet=pGpdet, Omega_m=Omega_m, linear=linear, weighted=weighted, weights=weights, assumed_band=assumed_band, pdettype=pdetstyle, sigmaprop=sigma_dl_prop_ass, sigmaradec=sigma_ra_ass, dl_det=dl_det_threshold, whole_sky_cat=whole_sky_cat, weightedcatalog=weightedcatalog, directpx=pxdirect, directradec=radecdirect, dl_distr=dl_distr, summationtype=summationtype, smoothedcatalog=smoothedcatalog, normalizedgaussiansigmad=normalizedgaussiansigmad, zpriortouse=zpriortouse, zmax=zmaxtouse, saveprecomputes=saveprecomputes)
+            likelihoodclass=likelihood(EventNumber=EventNumber, GW_data=EventsFiletouse, galaxy_catalog=CatalogCorr, precomputedinsidepdet=precomputedinsidepdet, precomputedoutsidepdet=precomputedoutsidepdet, precomputedpGpdet=precomputedpGpdet, insidepdet=insidepdettouse, outsidepdet=outsidepdet, pGpdet=pGpdet, Omega_m=Omega_m, linear=linear, weighted=weighted, weights=weights, assumed_band=assumed_band, pdettype=pdetstyle, sigmaprop=sigma_dl_prop_ass, sigmaradec=sigma_ra_ass, dl_det=dl_det_threshold, whole_sky_cat=whole_sky_cat, weightedcatalog=weightedcatalog, directpx=pxdirect, directradec=radecdirect, dl_distr=dl_distr, summationtype=summationtype, smoothedcatalog=smoothedcatalog, normalizedgaussiansigmad=normalizedgaussiansigmad, zpriortouse=zpriortouse, zmax=zmaxtouse, saveprecomputes=saveprecomputes)
             likelihoodevent,pxG,pDG,pGD, pxnG,pDnG,pnGD=likelihoodclass.likelihood(H0arr, complete=completeness, population=populationmethod, dimensions=dimensions)
             #print(likelihoodevent,pxG,pDG,pGD, pxnG,pDnG,pnGD)
             #print("pG ", pGD)
