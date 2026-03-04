@@ -21,14 +21,14 @@ from ScratchGwcosmoFunctions.FunctionsScratchGwcosmo import likelihood, likeliho
 
 from ScratchGwcosmoFunctions.ClusteringCompletionFunctions import CatalogCompletion
 
-                                                                                                                                                    
+                                                                                                                                                   
 path_to_run_direc="./"
 
 input = int(sys.argv[1])
 
-SetupAndEvents=False #if true, the code generates only the events and prepares the directories. Useful for running multiple realizations in parallel on a cluster using the same set of events.
-humantitle="ClusteredCompletion_"
-humantitle="Justatest_"
+SetupAndEvents=False
+#humantitle="LIGOIncompletenessReference_February2026_recompFalse_resol100_"
+humantitle="SpeedTest_corrfit_"
 ####################Cosmo params####################################
 linear=True
 Omega_m=0.25
@@ -37,61 +37,71 @@ H0_true=70.
 assumed_band="r"
 
 ##################Catalog Params#####################################
-completenessfraction=10 #global/total completeness fraction to be used
+differentcompletenesses=True
+allcomps=[1,2,5,10,20,50,90]
+#allcomps=[0.01,0.1,0.2,0.5]
 
-#load complete catalog
+Nrunpercomp=1
+if differentcompletenesses==True:
+    comp_index=int(input/Nrunpercomp)
+    completenessfraction=allcomps[comp_index]
+    print("Comp ", completenessfraction)
+    realizationnumber=input-comp_index*Nrunpercomp
+else:
+    completenessfraction=90
+    realizationnumber=input
+
 CatalogFullName="Catalogs/Micev1WithMTrueScratch_newms-r.hdf5"
+CatalogCutName="Catalogs/Micev1WithMTrueScratch_newms-r"+str(completenessfraction)+".hdf5"
 CatalogFull=galaxyCatalog(CatalogFullName)
 fullzs=CatalogFull.z
 fullras=CatalogFull.ra
 fulldecs=CatalogFull.dec
 
-##load incomplete catalog
-CatalogCutName="Catalogs/Micev1WithMTrueScratch_newms-r"+str(completenessfraction)+".hdf5"
 CatalogCut=galaxyCatalog(CatalogCutName)
 cutzs=CatalogCut.z
 cutras=CatalogCut.ra
 cutdecs=CatalogCut.dec
 
-zmax=0.1 #redshif limit of the catalog
-zpriortouse="uniform" #assumed prior, used if using LIGO style incompleteness or when filling the catalog in very empty redshift shells
+zmax=0.1
+zpriortouse="uniform"
 ###################################################################
 
 ###################Events params###############################
-dldets=[100,150,200,300,400] #loop over these detection thresholds
-dl_distr="gaussian-sigmad"  #type of distance posterior for GW events
-radec_distr='gaussian'        #type of angle posterior
+dldets=[100,150,200,300,400]
+dl_distr="gaussian-sigmad"
 #dl_det_threshold=200
-N_events=1000  #number of gw events
-linear_data_gen=True    #assume linear cosmology?
-sigma_dl_prop_ass=0.1    #distance error uncertainty
-sigma_ra_ass=0.1        #angle error uncertainty
+N_events=10
+linear_data_gen=True
+sigma_dl_prop_ass=0.1
+sigma_ra_ass=0.1
 sigma_dec_ass=0.1
 
-
-##all these variable are mostly just test for weird variants, safe to be ignored
-useglobalpdl=False 
+useglobalpdl=False
 globalpdlfile=None
 fullanglesky=False
+radec_distr='gaussian'
 withinbounds=False #Enforce that ra and dec are within catalog bounds?
 weightedcatevents=False
 centered=False
+
+SpecifiedEventDirec=path_to_run_direc+"FullCosmoRuns_corrfit_recompFalse_resol50_Micev1WithMTrueScratch_newms-r_R0/Events/"
+SpecifiedEventDirec=None
 #####################################################################
 
 ##################clustering params################################
-H0_assumed=70. #this is an assumed value of H0 that makes calculation easier code-wise, but has no impact on final result.
-r0=5.4 #Mpc #NORMAL VALUE IS 5.4 #scale correlation function parameter
-gamma=1.8 #NORMAL VALUE IS 1.8 #power correlation function parameter
-rmin=0.01 #min and max limit of correlation function
+H0_assumed=70.
+r0=5.4 #Mpc #NORMAL VALUE IS 5.4
+gamma=1.8 #NORMAL VALUE IS 1.8, MODIFY AS SOON AS YOU START RUN
+rmin=0.01
 rmax=10
-
-resol=100  #how many redshift shell to split the catalog into?
-scale=5. # relev pixels/gals for correlation function calculation are ones that are scale*R0 away from point considered
 CorrelationFunction="fit"
 
 
-recomputeclusteringprobs=False #after putting back a galaxies, do I recompute the clustering probabilities?
-#mostly variables for weird variants
+catalogcompletionnecessary=True
+resol=50
+recomputeclusteringprobs=False
+
 rateasnumberofgalsperpix=True
 renormrateasgals=True
 Npointavaragelowcount=None
@@ -102,12 +112,11 @@ if recomputeclusteringprobs==True:
 ###################################################################
 
 #####################Cosmo anal params##############################
-completecatalog=True #is the catalog used in the cosmo analysis complete?
-completeness=True #should the code assume the catalog is ocmplete?
+completeness=True    #Assume that the catalog is complete? If using LIGO incompleteness, this should be false. True in all other cases
 weightedcatalog=False
 zmaxtouse=zmax
 
-H0min=65 #H0 array
+H0min=65
 H0max=75
 H0arr=np.linspace(H0min,H0max,101)
 
@@ -116,12 +125,13 @@ weighted=False #either luminosity, custom (in case provide weights), or False
 weights=None
 assumed_band='r'
 populationmethod=False
-dimensions=3 #used to do 1d vs 3d analysis
-pxdirect=True #skip samples generation
+clustercompletion=False
+dimensions=3
+pxdirect=True
 radecdirect=pxdirect
 pdetstyle="theoretic"#True#"cube" #choose between cube, True (gwcosmopdet) or theoretic (Heaviside step function pdet, equation 22 from hitchhikers) or "ones"
 summationtype="None"#"logsumexp" #choose between logsumexp and  None
-smoothedcatalog=useglobalpdl
+smoothedcatalog=useglobalpdl#False#########CHANGE HERE
 JonStyleLikelihood=False
 normalizedgaussiansigmad=False
 pdetrenormtosimul=False
@@ -135,20 +145,17 @@ if smoothedcatalog==True:
 
 whole_sky_cat=fullanglesky
 precomputedinsidepdet=True
-precomputedoutsidepdet=False
-precomputedpGpdet=False
+precomputedoutsidepdet=True
+precomputedpGpdet=True
 saveprecomputes=True
 ############################################################################
 
-################################################################################START OF ACTUAL CODE########################################################################################
-eventsrealization = 0 #change number to get a new gw event realization
-
-#SETUP directories
-# 
+################################################################################START OF CODE########################################################################################
+eventsrealization = 0
 direcname=path_to_run_direc+humantitle+CatalogFullName[9:-5]+"_R"+str(eventsrealization)+"/"
 if os.path.exists(direcname)==False:
     os.mkdir(direcname)
-
+#####################################################################SETUP DIRECS##############################################################################################################
 CorrectedCatalogsdirec=direcname+"CorrectedCatalogs/"
 if os.path.exists(CorrectedCatalogsdirec)==False:
     os.mkdir(CorrectedCatalogsdirec)
@@ -161,9 +168,12 @@ CorrectedPdetsDirec=direcname+"PdetsCorrectedCatalogs/"
 if os.path.exists(CorrectedPdetsDirec)==False:
     os.mkdir(CorrectedPdetsDirec)
 
-EventDirec=direcname+"Events/"
-if os.path.exists(EventDirec)==False:
-    os.mkdir(EventDirec)
+if SpecifiedEventDirec==None:
+    EventDirec=direcname+"Events/"
+    if os.path.exists(EventDirec)==False:
+        os.mkdir(EventDirec)
+else:
+    EventDirec=SpecifiedEventDirec
 ##############################################################################################################################################################################################
 
 ###############################################################################EVENT GENERATION######################################################################################
@@ -186,26 +196,24 @@ if SetupAndEvents==True:
 ###############################################################################################################################################################################################
 
 #######################################################################CLUSTERING COMPLETION###################################################################################################
-realizationnumber=input
+if catalogcompletionnecessary==True:
+    CatalogCorrectedName=CorrectedCatalogsdirec+"Completed_csi"+CorrelationFunction+"_"+str(CatalogCutName[9:-5])+"_Recomp"+str(recomputeclusteringprobs)+"_resol"+str(resol)+"_rand"+str(realizationnumber)+".hdf5"
+    print(CatalogCorrectedName)
 
-print("Recompute ", recomputeclusteringprobs)
-print("By shell ", puttinggalaxiesbyshell)
-
-CatalogCorrectedName=CorrectedCatalogsdirec+"Completed_csi"+CorrelationFunction+"_"+str(CatalogCutName[9:-5])+"_Recomp"+str(recomputeclusteringprobs)+"_resol"+str(resol)+"_rand"+str(realizationnumber)+".hdf5"
-print(CatalogCorrectedName)
-
-if os.path.exists(CatalogCorrectedName)==False:
-    CompletionClass=CatalogCompletion(galaxy_catalog=CatalogCut, Omega_m=Omega_m, linear=linear, assumed_band=assumed_band, zmax=zmax, zpriortouse=zpriortouse, H0_assumed=H0_assumed, r0=r0, gamma=gamma, rmin=rmin, rmax=rmax, scale=scale, CorrelationFunction=CorrelationFunction, resol=resol)
+    CompletionClass=CatalogCompletion(galaxy_catalog=CatalogCut, Omega_m=Omega_m, linear=linear, assumed_band=assumed_band, zmax=zmax, zpriortouse=zpriortouse, H0_assumed=H0_assumed, r0=r0, gamma=gamma, rmin_corr=rmin, rmax_corr=rmax, CorrelationFunction=CorrelationFunction, resol=resol)
     rates=CompletionClass.CorrectCatalogHealpyFixedNgal013(Npointavaragelowcount=Npointavaragelowcount, newname=CatalogCorrectedName, rateasnumberofgalsperpix=rateasnumberofgalsperpix, renormrateasgals=renormrateasgals, CatalogFullzs=fullzs, recomputeProbsclust=recomputeclusteringprobs, puttinggalaxiesbyshell=puttinggalaxiesbyshell, startatzero=startatzero)
-else:
-    print("Already exists! ", CatalogCorrectedName)
 
+else:
+    if completeness==True:
+        CatalogCorrectedName=CatalogFullName
+    else:
+        CatalogCorrectedName=CatalogCutName
 
 #######################################################################COSMO ANALYSIS WITH CORRECTED CAT#####################################################################################
-#Now do cosmological analysis using the newly corrected catalog, assuming that to be a complete catalog
 CatalogCorr=galaxyCatalog(CatalogCorrectedName)
+
 ################Precompute Pdets##########################################
-#pdets are the same for every event, so precompute them once at the start
+
 def PrecomputePdetOnLaunch(precomputeclass, pdettype, pathtoprecomputedpdet, saveprecomputes, smoothedcatalog, emptycatalog, JonLikelihood):
     if smoothedcatalog==True:
         return("Smoothed catalog not implemented in precompute launch function!")
@@ -259,6 +267,7 @@ def PrecomputePdetOnLaunch(precomputeclass, pdettype, pathtoprecomputedpdet, sav
     return pdet
 
 print("Precomputing Pdets")
+
 for dl_det_threshold in dldets:
     print("Dldet ", dl_det_threshold)
     precomputeclass=PrecomputingClass(galaxy_catalog=CatalogCorr, CatalogFull=CatalogFull, dl_det=dl_det_threshold, Omega_m=Omega_m, linear=linear, assumed_band=assumed_band, zmax=zmaxtouse, sigmaprop=sigma_dl_prop_ass, weightedcat=weightedcatalog, zpriortouse=zpriortouse, dl_distr=dl_distr, pdettype=pdetstyle, weighted=weighted)
@@ -266,8 +275,14 @@ for dl_det_threshold in dldets:
     insidepdet=PrecomputePdetOnLaunch(precomputeclass=precomputeclass, pdettype="inside", pathtoprecomputedpdet=pathtoprecomputedinsidepdet, saveprecomputes=saveprecomputes, smoothedcatalog=smoothedcatalog, emptycatalog=emptycatalog, JonLikelihood=JonStyleLikelihood)
     print("inside pdet corr ", np.loadtxt(insidepdet))
 
-outsidepdet=None
-pGpdet=None
+    if completeness==False:
+        pathtoprecomputedoutsidepdet="Pdets/outsidepdet_zmaxass"+str(zmaxtouse)+"_"+CatalogCutName[9:-5]+"_lin-"+str(linear_data_gen)+"dl-distr-"+dl_distr+"_zprior-"+str(zpriortouse)+"_dldetused"+str(dl_det_threshold)+"_sigmaprop"+str(sigma_dl_prop_ass)+"_"+str(H0min)+"-"+str(H0max)+"-len"+str(len(H0arr))+".txt"
+        outsidepdet=PrecomputePdetOnLaunch(precomputeclass=precomputeclass, pdettype="outside", pathtoprecomputedpdet=pathtoprecomputedoutsidepdet, saveprecomputes=saveprecomputes, smoothedcatalog=smoothedcatalog, emptycatalog=emptycatalog, JonLikelihood=JonStyleLikelihood)
+
+
+        pathtoprecomputedpGpdet="Pdets/pGpdet_zmaxass"+str(zmaxtouse)+"_"+CatalogCutName[9:-5]+"_lin-"+str(linear_data_gen)+"_assband-"+assumed_band+"_lin-"+str(linear)+"_dl-distr-"+dl_distr+"_zprior-"+str(zpriortouse)+"_dldetused"+str(dl_det_threshold)+"_sigmaprop"+str(sigma_dl_prop_ass)+"_"+str(H0min)+"-"+str(H0max)+"-len"+str(len(H0arr))+".txt"
+        pGpdet=PrecomputePdetOnLaunch(precomputeclass=precomputeclass, pdettype="pG", pathtoprecomputedpdet=pathtoprecomputedpGpdet, saveprecomputes=saveprecomputes, smoothedcatalog=smoothedcatalog, emptycatalog=emptycatalog, JonLikelihood=JonStyleLikelihood)
+
 ###########################################################################
 
 ###########################################################################
@@ -286,16 +301,27 @@ for dl_det_threshold in dldets:
     datastodumplist=[]
     EventsFiletouse=EventsFile.replace("_dldet-"+str(dldets[-1]), "_dldet-"+str(dl_det_threshold)) #the EventsFile variable from the event generating bit will be set to last det threshold (usually 400), here I change it so everyone has different det threshold
     insidepdettouse=insidepdet.replace("_dldetused"+str(dldets[-1]), "_dldetused"+str(dl_det_threshold))
-    CosmoAnalDirec=CosmoAnalParentDirec+CatalogCorrectedName[len(CorrectedCatalogsdirec):-5]+"_dldet"+str(dl_det_threshold)+"/"
+    if completeness==False:
+        outsidepdettouse=outsidepdet.replace("_dldetused"+str(dldets[-1]), "_dldetused"+str(dl_det_threshold))
+        pGpdettouse=pGpdet.replace("_dldetused"+str(dldets[-1]), "_dldetused"+str(dl_det_threshold))
+    else:
+        outsidepdettouse=None
+        pGpdettouse=None
+        
+    if catalogcompletionnecessary==True:
+        CosmoAnalDirec=CosmoAnalParentDirec+CatalogCorrectedName[len(CorrectedCatalogsdirec):-5]+"_dldet"+str(dl_det_threshold)+"/"
+    else:
+        CosmoAnalDirec=CosmoAnalParentDirec+CatalogCorrectedName[9:-5]+"_dldet"+str(dl_det_threshold)+"/"
+    
     if os.path.exists(CosmoAnalDirec)==False:
         os.mkdir(CosmoAnalDirec)
     print("dldet ", dl_det_threshold)
-    #analyze all events
+
     for EventNumber in EventNumbers:
         print("EVENT "+str(EventNumber))
         EventNumber=str(EventNumber)
         if JonStyleLikelihood==False:
-            likelihoodclass=likelihood(EventNumber=EventNumber, GW_data=EventsFiletouse, galaxy_catalog=CatalogCorr, precomputedinsidepdet=precomputedinsidepdet, precomputedoutsidepdet=precomputedoutsidepdet, precomputedpGpdet=precomputedpGpdet, insidepdet=insidepdettouse, outsidepdet=outsidepdet, pGpdet=pGpdet, Omega_m=Omega_m, linear=linear, weighted=weighted, weights=weights, assumed_band=assumed_band, pdettype=pdetstyle, sigmaprop=sigma_dl_prop_ass, sigmaradec=sigma_ra_ass, dl_det=dl_det_threshold, whole_sky_cat=whole_sky_cat, weightedcatalog=weightedcatalog, directpx=pxdirect, directradec=radecdirect, dl_distr=dl_distr, summationtype=summationtype, smoothedcatalog=smoothedcatalog, normalizedgaussiansigmad=normalizedgaussiansigmad, zpriortouse=zpriortouse, zmax=zmaxtouse, saveprecomputes=saveprecomputes)
+            likelihoodclass=likelihood(EventNumber=EventNumber, GW_data=EventsFiletouse, galaxy_catalog=CatalogCorr, precomputedinsidepdet=precomputedinsidepdet, precomputedoutsidepdet=precomputedoutsidepdet, precomputedpGpdet=precomputedpGpdet, insidepdet=insidepdettouse, outsidepdet=outsidepdettouse, pGpdet=pGpdettouse, Omega_m=Omega_m, linear=linear, weighted=weighted, weights=weights, assumed_band=assumed_band, pdettype=pdetstyle, sigmaprop=sigma_dl_prop_ass, sigmaradec=sigma_ra_ass, dl_det=dl_det_threshold, whole_sky_cat=whole_sky_cat, weightedcatalog=weightedcatalog, directpx=pxdirect, directradec=radecdirect, dl_distr=dl_distr, summationtype=summationtype, smoothedcatalog=smoothedcatalog, normalizedgaussiansigmad=normalizedgaussiansigmad, zpriortouse=zpriortouse, zmax=zmaxtouse, saveprecomputes=saveprecomputes)
             likelihoodevent,pxG,pDG,pGD, pxnG,pDnG,pnGD=likelihoodclass.likelihood(H0arr, complete=completeness, population=populationmethod, dimensions=dimensions)
             #print(likelihoodevent,pxG,pDG,pGD, pxnG,pDnG,pnGD)
             #print("pG ", pGD)
@@ -319,8 +345,6 @@ for dl_det_threshold in dldets:
             datastodumplist.append(datastodump)
         plt.plot(H0arr, likelihoodnorm, ls='dashed', alpha=0.6)
         print(" ")
-
-    #plot and save stuff
     t1=time.time()
     averagetime=(t1-t0)/len(EventNumbers)
     print("Total time for "+str(len(EventNumbers))+" events was "+str(t1-t0)+" s for an average of "+str(averagetime)+" s per event")
