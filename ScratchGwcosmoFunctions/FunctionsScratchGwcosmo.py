@@ -291,13 +291,32 @@ class PrecomputingClass(object):
     def pD_outside_theoretic_precompute_Jon(self, H0):
         den = np.zeros(len(H0))
         bar = progressbar.ProgressBar()
-        print("Calculating p(D|H0,bar{G})")
+        print("Calculating p(D|H0,bar{G}) JonStyle ")
         for i in bar(range(len(H0))):
             def Integrand(z):
                 return self.pzout(z)*self.pD_Heaviside_theoretic_precompute(z,H0[i])
             den[i] = quad(Integrand, 0, self.zmax, epsabs=epsabsforFunctionsScratch,epsrel=1.49e-9)[0]
         return den
+    
+    def pGJon(self,H0):
+        # Warning - this integral misbehaves for small values of H0 (<25 kms-1Mpc-1).  TODO: fix this.
+        num = np.zeros(len(H0)) 
+        den = np.zeros(len(H0))
+        bar = progressbar.ProgressBar()
+        print("Calculating p(G|H0,D) JonStyle")
+        for i in bar(range(len(H0))):
+            def I(M,z):
+                return SchechterMagFunction(H0=H0[i],Mstar_obs=self.Mstar_obs,alpha=self.alpha)(M)*self.zprior(z)
 
+            Mmin = M_Mobs(H0[i],self.Mobs_min)
+            Mmax = M_Mobs(H0[i],self.Mobs_max)
+            
+            num[i] = dblquad(I, 0, self.zmax, lambda x : Mmin, lambda x: min(max(M_mdl(self.mth,self.cosmo.dl_zH0(x,H0[i])),Mmin),Mmax),epsabs=epsabsforFunctionsScratch,epsrel=epsrelforFunctionsScratch)[0]
+            den[i] = dblquad(I, 0, self.zmax, lambda x: Mmin, lambda x: Mmax, epsabs=epsabsforFunctionsScratch,epsrel=epsrelforFunctionsScratch)[0]
+            
+        self.pGD = num/den
+        print(self.pGD)
+        return self.pGD  
 
 class likelihood(object):
     """
@@ -1125,7 +1144,7 @@ class likelihoodJon(object):
     def px_dec_direct(self, dec):
         return gaussian(dec, mu=self.dec_gw, sig=self.sigmaradec)
     
-    def __init__(self, EventNumber, galaxy_catalog, GW_data, dl_det, sigmaprop, sigmaradec, assumed_band='r', linear=True, Omega_m=0.25, zmax=0.1, precomputedpdets=False, insidepdetpath=None, outsidepdetpath=None, completeness=None, emptycatalogrun=False):
+    def __init__(self, EventNumber, galaxy_catalog, GW_data, dl_det, sigmaprop, sigmaradec, assumed_band='r', linear=True, Omega_m=0.25, zmax=0.1, precomputedpdets=False, insidepdetpath=None, outsidepdetpath=None, pGpdetpath=None, completeness=None, emptycatalogrun=False, complete=False):
         #self.precomputedinsidepdet=precomputedinsidepdet
         #self.precomputedoutsidepdet=precomputedoutsidepdet
         #self.precomputedpGpdet=precomputedpGpdet
@@ -1145,6 +1164,7 @@ class likelihoodJon(object):
         self.sigmaprop=sigmaprop
         self.sigmaradec=sigmaradec
         self.emptycatalogrun=emptycatalogrun
+        self.complete=complete
         
         if self.emptycatalogrun==False:
             self.allz = galaxy_catalog.z
@@ -1161,10 +1181,13 @@ class likelihoodJon(object):
             self.dec_gw=samps[EventNumber]["dec_gw"][()]
             if self.emptycatalogrun==False:
                 self.tempsky = self.px_radec_independent(self.allra, self.alldec)
+                self.avaragetempsky = sum(self.tempsky)/self.nGal
+
 
         self.precomputedpdets=precomputedpdets
         self.insidepdetpath=insidepdetpath
         self.outsidepdetpath=outsidepdetpath
+        self.pGpdetpath=pGpdetpath
         self.completeness=completeness
                 
         self.pDG = None
@@ -1186,28 +1209,38 @@ class likelihoodJon(object):
     def likelihoodJon(self, H0, dimensions=3):
         #likelihood Jon's way
         if self.emptycatalogrun==False:
-        
-            if self.completeness is not None:
-                self.pG=np.ones(len(H0))*self.completeness
-            else:
-                self.pG=self.pGJon(H0)
-                self.completeness=self.pG[0]
-            self.pnG=np.ones(len(H0))-self.pG
-            
             if self.precomputedpdets==True:
                 self.pDG=self.Read_precomputed_pdet_or_pG(self.insidepdetpath)
-                self.pDnG=self.Read_precomputed_pdet_or_pG(self.outsidepdetpath)
-                #self.pDnG=self.pdetout(H0)
-
-            self.den=self.pDG*self.pG + self.pDnG#Careful about this term, not sure
+                if self.complete==False:
+                    self.pDnG=self.Read_precomputed_pdet_or_pG(self.outsidepdetpath)
+                    #self.pDnG=self.pdetout(H0)
+                    if self.completeness is not None:
+                        self.pG=np.ones(len(H0))*self.completeness
+                    else:
+                        self.pG=self.Read_precomputed_pdet_or_pG(self.pGpdetpath)
+                        self.completeness=self.pG[0]
+                        self.pnG=np.ones(len(H0))-self.pG
+                else:
+                    self.completeness=1
+                    self.pDnG=np.ones(len(H0))
+                    self.pG=np.ones(len(H0))
+                    self.pnG=np.zeros(len(H0))
+            if self.complete==True:
+                self.den=self.pDG
+            else:
+                self.den=self.pDG*self.pG + self.pDnG*self.pnG#Careful about this term, not sure. Previous version didn't have *self.pnG at the end#CHANGE 
         
             if dimensions==1:
                 self.pxG=self.pxG_1D(H0)
             else:
                 self.pxG=self.pxG_3D(H0)
-    
-            self.pxnonG=self.pxnG(H0)
-            self.num=self.pxG+self.pxnonG
+
+            if self.complete==False:
+                self.pxnonG=self.pxnG(H0)
+                self.num=self.pxG+self.pxnonG
+            else:
+                self.num=self.pxG
+                self.pxnonG=np.zeros(len(H0))
         
         else:
             self.pG=np.zeros(len(H0))
@@ -1226,7 +1259,7 @@ class likelihoodJon(object):
         
 
         likelihood=self.num/self.den
-        print("likelihood ", likelihood)
+        #print("likelihood ", likelihood)
         
 
         return likelihood, self.pxG, self.pDG, self.pG, self.pxnonG, self.pDnG, self.pnG
@@ -1291,13 +1324,11 @@ class likelihoodJon(object):
         print("Calculating p(x|H0,G)")
         # loop over galaxies
         for i in bar(range(len(self.allz))):
-
             tempdist = self.px_dl_direct_gaussiansigmad(self.cosmo.dl_zH0(self.allz[i], H0))#/self.cosmo.dl_zH0(zs[i], H0)**2 # remove dl^2 prior from samples but I'm creating the likelihood myself so probably not needed
-                
             numinner = tempdist*self.tempsky[i]
             num += numinner
         
-        numnorm=num*self.completeness/self.nGal
+        numnorm=num*self.completeness/(self.nGal*self.avaragetempsky)
         
         return numnorm
     
@@ -1331,7 +1362,8 @@ class likelihoodJon(object):
             def Integrand(z):
                 return self.px_dl_direct_gaussiansigmad(self.cosmo.dl_zH0(z, H0[i]))*self.pzout(z)
             num[i] = quad(Integrand, 0, self.zmax, epsabs=epsabsforFunctionsScratch,epsrel=1.49e-9)[0]
-        return num
+
+        return num*self.pnG #Here it was without the *self.pnG before #CHANGE
     
     def pD_Heaviside_theoretic(self, z, H0):
         dl=self.cosmo.dl_zH0(z, H0)

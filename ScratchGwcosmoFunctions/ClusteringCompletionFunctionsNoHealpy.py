@@ -9,6 +9,7 @@ from scipy.interpolate import interp1d
 import progressbar
 from scipy.integrate import quad, dblquad
 import h5py
+
 from utilities.standard_cosmology import *
 from utilities.schechter_function import *
 from utilities.schechter_params import *
@@ -48,10 +49,6 @@ def Extractz(zmin, zmax):
 	N=zmax**3/3-zmin**3/3
 	z=(3*N*u+zmin**3)**(1./3.)
 	return z
-
-def ExtractZshellwithrates(zarray, ratestimeszsquared):
-    zchoice=np.random.choice(range(len(zarray)), p=ratestimeszsquared)
-    return zchoice
 
 def SphereSectionVolume(ramin, ramax, decmin, decmax, zmin, zmax):
     thetamin=np.pi/2-decmax
@@ -108,6 +105,32 @@ def CarttoSkyCoo(galvec):
 		ra+=2*np.pi
 	return ra, dec, dist
 
+class SkyPixelization(object):
+    def __init__ (self, ramin, ramax, decmin, decmax, zmin, zmax, resol):
+        self.ramin = ramin
+        self.ramax = ramax
+        self.decmin = decmin
+        self.decmax = decmax
+        self.zmin = zmin
+        self.zmax = zmax
+        self.resol = resol
+
+        for i in range(60):
+            if i<12:
+                theta, phi = hp.pix2ang(1, i)
+            else:
+                theta, phi = hp.pix2ang(2, i)
+            
+            print(theta, phi)
+        sys.exit()
+
+
+    
+
+
+        
+
+
 class CatalogCompletion(object):
     def __init__ (self, galaxy_catalog, Omega_m, linear, assumed_band, zmax, zpriortouse, H0_assumed, r0, gamma, rmin_corr, rmax_corr, resol=100, CorrelationFunction=None, fullskyorfraction="octave"):
         #cosmology params
@@ -154,6 +177,7 @@ class CatalogCompletion(object):
         self.H0_assumed=H0_assumed
         self.r0=r0 #in MPC
 
+        self.z0=self.r0*self.H0_assumed/c
         self.gamma=gamma #NORMAL VALUE IS 1.8, MODIFY AS SOON AS YOU START RUN
         self.rmin_corr=rmin_corr
         self.rmax_corr=rmax_corr
@@ -170,6 +194,7 @@ class CatalogCompletion(object):
         elif CorrelationFunction=="fit":
             self.CorrFunction=self.csi_fit
             self.r0=r0fit #in MPc
+            self.z0=self.r0*self.H0_assumed/c
             self.gamma=gammafit #NORMAL VALUE IS 1.8, MODIFY AS SOON AS YOU START RUN
             
             
@@ -255,12 +280,6 @@ class CatalogCompletion(object):
         theta, phi = hp.pix2ang(zindex+1, healpyindex)
         ra, dec = self.HealpyAngtoradec(theta, phi)
         return [ra, dec, z]
-
-    def HealpytoRaDec(self, healpyindex, zindex):
-        #print(zindex, healpyindex)
-        theta, phi = hp.pix2ang(zindex+1, healpyindex)
-        ra, dec = self.HealpyAngtoradec(theta, phi)
-        return [ra, dec]
 
     def PixIndexToCartCoo(self, index):
         SkyCoo=self.PixIndextoSkyCoo(index)
@@ -404,7 +423,7 @@ class CatalogCompletion(object):
                     cor=self.CorrFunction(r)*self.pix_occup[closepix_index]
                     prob+=cor
                    
-        raedgemin, raedgemax, decedgemin, decedgemax = self.NewGetPixelEdges(index) #compute pixel volume 
+        raedgemax, raedgemin, decedgemax, decedgemin = self.GetPixelEdges(index) #compute pixel volume 
         chopix_ra, chopix_dec, chopix_z = self.PixIndextoSkyCoo(index)
         zedgemin=max(chopix_z-self.deltaz/2, 0.)
         zedgemax=min(chopix_z+self.deltaz/2, self.zmax)  
@@ -431,7 +450,7 @@ class CatalogCompletion(object):
         return prob*PixelVolumeWithinCatalog #return clustering prob * volume, so that smaller pixels (usually at the edges) don't form overdensity of galaxies (same prob, smaller volume means higher density)
        
     
-    def AssignPixelProbs(self, startatzero=False, readclustpfromfile=False, numberofgalsperpix="normal", savefile=False):
+    def AssignPixelProbs(self, startatzero=False, readclustpfromfile=False, rateasnumberofgalsperpix=False, savefile=False):
         probs=np.zeros(self.totalPixelNumber)
         actualpixcount=0
         nonzeropixels=0
@@ -448,7 +467,7 @@ class CatalogCompletion(object):
             zindexbase=self.zindextoBasePix(m)
             for i in np.arange(self.zindextoPixNumber(m)):
                 pixindex=i+zindexbase
-                pixraedgemin, pixraedgemax, pixdecedgemin, pixdecedgemax = self.NewGetPixelEdges(pixindex)#check if the pixel falls at least partly within the bounds of the catalog
+                pixraedgemax, pixraedgemin, pixdecedgemax, pixdecedgemin = self.GetPixelEdges(pixindex)#check if the pixel falls at least partly within the bounds of the catalog
                 if pixraedgemax>self.minra and pixraedgemin<self.maxra and pixdecedgemax>self.mindec and pixdecedgemin<self.maxdec:
                     #print("Pix within limits!")
                     actualpixcount+=1
@@ -464,20 +483,19 @@ class CatalogCompletion(object):
                 else:
                     clustp=0
             
-                if numberofgalsperpix=="weight": #this should be the main one
+                if rateasnumberofgalsperpix==False: #this should be the main one
                     prob=clustp*self.redshiftrates[m] ####TODO: area not needed anymore _kinda_, pixels on the border will have some different area.
                 else: 
                     prob=clustp
 
                 probs[pixindex]=prob 
                 #clustpfile.write(str(clustp)+"\n")
-
         print("Number of non zero pixels: ", nonzeropixels)	
         if readclustpfromfile is not False:
             clustpfile.close()
 
         probs[np.isfinite(probs)==False]=0 #set every not finite number to 0 in probs
-        if numberofgalsperpix!="weight": #put to zero the probs of pixel in shells already complete
+        if rateasnumberofgalsperpix==True: #put to zero the probs of pixel in shells already complete
             for zindex in np.arange(len(self.NgalperRedshift)):
                 if self.NgalperRedshift[zindex]<=0:
                     pixtozerobase=self.zindextoBasePix(zindex)
@@ -485,26 +503,113 @@ class CatalogCompletion(object):
                     print("Redshift shell ", zindex, " starting complete! ")
                     
         summ=sum(probs)
+        print(summ)
         probsnorm=probs/summ
         print("Length of probsnorm", len(probsnorm))
         np.savetxt(self.newname[:-5]+"_ProbsNorm.txt", probsnorm)
         return probs, probsnorm
     
+    def BinningGalaxiesandAssignProbs(self, startatzero=False):
+        t0=time.perf_counter()
+        pixs=np.zeros(self.totalPixelNumber)
+        if startatzero==False:
+            probs=np.zeros(self.totalPixelNumber)
+        else:
+            probs=np.ones(self.totalPixelNumber)
+        bar = progressbar.ProgressBar()
+
+        for i in bar(np.arange(len(self.allz))):
+            gal=self.galaxy_catalog.get_galaxy(i)
+            z_shell=self.RedshiftShell(gal.z)
+            phi, theta = self.radectoHealpyCoo(gal.ra, gal.dec)
+            
+            #print(ztoNSIDE(resol, z_shell))
+            pix_shell_number=hp.ang2pix(self.ztoNSIDE(z_shell), theta, phi)
+            
+            pix_index=self.ztoBasePix(z_shell)+pix_shell_number
+            if pix_index>len(pixs):
+                print("PROBLEM")
+                print("gal z = ", gal.z)
+                print("Redshift shell = ", z_shell)
+                print("Base pixels (sum of pixels of shells before) =", pix_index)
+
+            pixs[pix_index]+=1
+            #print("Assigned gal at pix ", pix_index)
+            #print("Getting neighbours...")
+            closepixels=self.GetrelevPixelsHealpy(pix_index)
+            pix_coo= self.PixIndextoSkyCoo(pix_index)#get coordinate of pixels in ra, dec, z
+            distances=self.BatchAnalyticalSpherePointsDistance(centerpixcoo=pix_coo, batchpixels=closepixels, type='distance')#Get distances of closeby pixels
+        
+            if startatzero==True:
+                prob=0.
+            else:
+                prob=1.
+            #print("Looping through ", len(closepixels), " neighbours")
+            for i, closepix_index in enumerate(closepixels):#loop through all pixels close to the one where the galaxy was added, and add accordingly the correlation function probability.
+                closepix_ra, closepix_dec, closepix_z = self.PixIndextoSkyCoo(closepix_index)
+                zedgemin=max(closepix_z-self.deltaz/2, 0.)
+                zedgemax=min(closepix_z+self.deltaz/2, self.zmax)  
+                closepixraedgemax, closepixraedgemin, closepixdecedgemax, closepixdecedgemin = self.GetPixelEdges(closepix_index)#check if the pixel falls at least partly within the bounds of the catalog
+                if closepixraedgemax>self.minra and closepixraedgemin<self.maxra and closepixdecedgemax>self.mindec and closepixdecedgemin<self.maxdec:
+                    r=distances[i]
+                    #print("Neighbours at least partially within catalog! Distance ", r)
+                    if r<self.rmax_corr:#this if might be necessary for speed but I already choose only closeby pixels so maybe not 
+                        #name=input("Distance of this neighbouring pixel is less than rmax! "+str(r))
+                        
+                        cor=self.CorrFunction(r)
+                        probs[closepix_index]+=cor
+                        #print("cor ", cor)
+                        #print("PixelVolume ", PixelVolumeWithinCatalog)
+                        #name=input("updating probs by " + str(cor))
+
+        print("Time for computing clustering probs ", time.perf_counter()-t0)
+        
+        #renorming each pixel by its volume
+        bar=progressbar.ProgressBar()
+        t1=time.perf_counter()
+        volumes=[]
+        for ind in bar(range(self.totalPixelNumber)):
+            t0=time.perf_counter()
+            pixraedgemax, pixraedgemin, pixdecedgemax, pixdecedgemin = self.GetPixelEdges(ind)#check if the pixel falls at least partly within the bounds of the catalog
+            print("Time for edges ", time.perf_counter()-t0)
+
+            t0=time.perf_counter()
+            if pixraedgemax>self.minra and pixraedgemin<self.maxra and pixdecedgemax>self.mindec and pixdecedgemin<self.maxdec:
+                raactualmin=max(self.minra, pixraedgemin)
+                raactualmax=min(self.maxra, pixraedgemax)
+                decactualmin=max(self.mindec, pixdecedgemin)
+                decactualmax=min(self.maxdec, pixdecedgemax)
+                #print("Borders of neighbour pixel ", raactualmin, raactualmax, decactualmin, decactualmax, zedgemin, zedgemax)
+                PixelVolumeWithinCatalog=SphereSectionVolume(ramin=raactualmin, ramax=raactualmax, decmin=decactualmin, decmax=decactualmax, zmin=zedgemin, zmax=zedgemax)
+                if PixelVolumeWithinCatalog<0.:
+                    input("Volume less than zero!")
+                    print("ras ", raactualmin, raactualmax)
+                    print("decs ", decactualmin, decactualmax)
+                    print("zs ", zedgemin, zedgemax)
+                    input("Continue?")
+                volumes.append(PixelVolumeWithinCatalog)
+                probs[ind]=probs[ind]*PixelVolumeWithinCatalog
+                print("Time for everything else ", time.perf_counter()-t0)
+            
+            else:
+                t0=time.perf_counter()
+                probs[ind]=0
+                volumes.append(0.)
+                print("Time when zero ", time.perf_counter()-t0)
+            input("continue")
+                
+        np.savetxt("WithinCatalogPixelVolumes_resol30.txt", volumes)
+        sys.exit()
+        print("Time for renormalizing by volume ", time.perf_counter()-t1)
+        print("Probs sum ", sum(probs))
+        print("Time for binning and computing probs", time.perf_counter()-t0)
+        return pixs, probs
+
+    
     def GetRates(self, zs):
         rates=np.ones(len(zs))
-        firstratenonzerocheck=None
         for i in range(len(zs)):
             rates[i]=1-self.fz(zs[i])
-            if firstratenonzerocheck is None:
-                if rates[i]>0.:
-                    firstratenonzerocheck=i
-        print(rates)
-        #sys.exit()
-        for i in range(len(rates)):
-            if i>firstratenonzerocheck:
-                if rates[i]==0.:
-                    rates[i]=1.
-        
         return rates
 
     def ComputeCompleteness(self,H0):
@@ -550,28 +655,28 @@ class CatalogCompletion(object):
 
         for i in np.arange(len(self.z_hist_count)):
             if self.z_hist_count[i]<=2 and i>=5: #cannot "trust" redshift shell with so few galaxies. use here a zsquared
-                #ratestouse[i]=0.
+                ratestouse[i]=0.
                 if first_untrust_zshell==None:
                     combine_zsquared_zerogal=True
                     first_untrust_zshell=i
-        if first_untrust_zshell==None:
-            first_untrust_zshell=len(ratestouse)+10 #if this number has not been set before and was still none, there are no untrust shell. So set the first untrust shell to some ranodm number higher than the highest shell
-        NGalperRedshift=np.zeros(len(ratestouse))
-        for i in range(len(ratestouse)):
-            if i <first_untrust_zshell:
-                NGalperRedshift[i] = round(ratestouse[i]*self.z_hist_count[i]/(1-ratestouse[i])) #this would be the answer (eventualmente renormalized)
+                
+        NGalperRedshift=np.array([round(ratestouse[i]*self.z_hist_count[i]/(1-ratestouse[i])) for i in np.arange(len(ratestouse))]) #this would be the answer (eventualmente renormalized)
         #print(NGalperRedshift)
         zsquared_count=self.z_hist_means**2
         if combine_zsquared==True: # this is a combination with a zsquared distribution for low completenesses, competitor with the Npoint avarage. Usually not used
             if renorm == True:
-
+                
+            
+                
                 NGalzsquared=0
                 first_untrust_zshell=None
                 for i in np.arange(len(NGalperRedshift)):
                     if rates[i]>incompleteness_threshold: #if completeness is less than 1%
                         NGalzsquared+=NGalperRedshift[i] #Compute number of galaxies that "cannot be trusted"
                         if first_untrust_zshell is None:
-                            first_untrust_zshell=i                
+                            first_untrust_zshell=i
+                
+                
 
                 fact=NGalzsquared/sum(zsquared_count[first_untrust_zshell:]) #Renormalization factor so that the sum of the untrusty redshift shell, with squared weights, is the galaxies that I have to add based on zsquared.
                 zsquared_count=zsquared_count*fact
@@ -595,16 +700,15 @@ class CatalogCompletion(object):
             zsquared_count_new=zsquared_count*factor
             NGalperRedshift[first_untrust_zshell:]=zsquared_count_new[first_untrust_zshell:]
             #print(factor, zsquared_count_new, NGalperRedshift)
+
+        NGalperRedshiftNotnorm=NGalperRedshift
         
         print("If not renormalizing, I would have to add ", sum(NGalperRedshift), " instead of ", NGalAdd, " corresponding to a ", round(abs(sum(NGalperRedshift)-NGalAdd)/NGalAdd*100), "% difference")
-        NGalperRedshiftnormbyNgalAdd=NGalperRedshift/sum(NGalperRedshift)*NGalAdd #finally, renormalize
-        
-        return NGalperRedshiftnormbyNgalAdd
+        NGalperRedshift=NGalperRedshift/sum(NGalperRedshift)*NGalAdd #finally, renormalize
+        #print("Ngaladd is ", NGalAdd, " and I will add ", sum(NGalperRedshift))
 
-    def PoissonAssignGalPerRedshift(self, estimatedgalnumber):
-        poissonNgalperRedshift = [np.random.poisson(rate) for rate in estimatedgalnumber]
-        return poissonNgalperRedshift
-
+        return NGalperRedshift, NGalperRedshiftNotnorm 
+    
     def GetrelevPixelsHealpy(self, index):
         z_index=self.PixIndextoZindex(index)
         deltaz=self.z_hist_means[1]-self.z_hist_means[0]
@@ -627,73 +731,81 @@ class CatalogCompletion(object):
                         sel.append(pixindex)
         return sel 
     
-    def NewGetPixelEdges(self, pixindex):
-        zindex=self.PixIndextoZindex(pixindex)
-        healpyindex=pixindex-self.zindextoBasePix(zindex)
-        pix_ra, pix_dec = self.HealpytoRaDec(healpyindex=healpyindex, zindex=zindex)
+    def GetPixelEdges(self, pixindex):
+        higherra=None
+        lowerra=None
+        higherdec=None
+        lowerdec=None
+        #print(pixindex)
+        if pixindex>=self.maxpixindex:
+            print("Pix out of bounds for resol ", str(self.resol))
+            return higherra, lowerra, higherdec, lowerdec
         
-        #borders=["SW", "W", "NW", "N", "NE", "E", "SE", "S"] #maybe directly loop over this?
-        sel=hp.get_all_neighbours(zindex+1, healpyindex)
-        neighralow=None
-        neighrahigh=None
-        neighdeclow=None
-        neighdechigh=None
+        #t0=time.perf_counter()
+        #print("pix index ", pixindex)
+        pix_ra, pix_dec, pix_z = self.PixtoSkyCoo(pixindex)
+        pixcount=1
+        #note: up and down refer only to pix number increasing or decreasing, nothing spatial wise.
+        #In healpy, increasing the healpy index increases RA (until a change of dec) and decreases (or stays equal) dec (until z changes ofc)
 
-        for neighindex in sel:
-            if neighindex!=-1:
-                neigh_ra, neigh_dec = self.HealpytoRaDec(healpyindex=neighindex, zindex=zindex)
-                #print("Neigh coo ", neigh_ra, neigh_dec)
+        while True:
+            pixindexup=pixindex+pixcount
+            if pixindexup<self.maxpixindex:
+                pixupra, pixupdec, pixupz = self.PixtoSkyCoo(pixindexup)
+                #print("pixup ", str(pixindexup), " coo: ", pixupra, pixupdec, pixupz)
+        
+            pixindexdown=pixindex-pixcount
+            if pixindexdown>=0:
+                pixdownra, pixdowndec, pixdownz = self.PixtoSkyCoo(pixindexdown)
+                #print("pixdown ", str(pixindexup), "coo: ", pixdownra, pixdowndec, pixdownz)
+            
                 
-                if neigh_dec==pix_dec:
-                    if neighralow is None:
-                        if neigh_ra<pix_ra:
-                            neighralow=neigh_ra
-                    else: 
-                        if neigh_ra<pix_ra and neigh_ra>neighralow:
-                            neighralow=neigh_ra
 
-                    if neighrahigh is None:
-                        if neigh_ra>pix_ra:
-                            neighrahigh=neigh_ra
-                    else: 
-                        if neigh_ra>pix_ra and neigh_ra<neighrahigh:
-                            neighrahigh=neigh_ra
-                
+            if pixindexup<self.maxpixindex and pixupz==pix_z:
+                if pixupdec==pix_dec:
+                    if higherra==None:
+                        higherra=(pixupra+pix_ra)/2
+                        #print("higherra found thanks to pixup!", higherra)
                 else:
-                    if neighdeclow is None:
-                        if neigh_dec<pix_dec:
-                            neighdeclow=neigh_dec
-                    else:
-                        if neigh_dec<pix_dec and neigh_dec>neighdeclow:
-                            neighdeclow=neigh_dec
+                    if lowerdec is None:    
+                        lowerdec=(pixupdec+pix_dec)/2
+                        #print("lowerdec found thanks to pixup!", lowerdec)
+                    if higherra==None:
+                        higherra=2*np.pi
+            else:
+                if lowerdec is None:
+                    lowerdec=-np.pi/2
+                if higherra is None:
+                    higherra=2*np.pi
+            
+            
+            if pixindexdown>=0 and pixdownz==pix_z:
+                if pixdowndec==pix_dec:
+                    if lowerra==None:
+                        lowerra=(pixdownra+pix_ra)/2
+                        #print("lowerra found thanks to pixdown!", lowerra)
+                else:
+                    if higherdec==None:
+                        higherdec=(pixdowndec+pix_dec)/2
+                        #print("lowerdec found thanks to pixup!", higherdec)
+                    if lowerra==None:
+                        lowerra=0.
 
-                    if neighdechigh is None:
-                        if neigh_dec>pix_dec:
-                            neighdechigh=neigh_dec
-                    else:
-                        if neigh_dec>pix_dec and neigh_dec<neighdechigh:
-                            neighdechigh=neigh_dec
+            else:
+                if higherdec is None:
+                    higherdec=np.pi/2
+                if lowerra is None:
+                    lowerra=0.
+        
+            
+        
+            if higherra is not None and higherdec is not None and lowerdec is not None and higherdec is not None:
+                break
+            else:
+                pixcount+=1
+                #print("Not everything found! ", higherra, lowerra, higherdec, lowerdec)
 
-        if neighralow is None:
-            raedgemin=0.
-        else:
-            raedgemin=(neighralow+pix_ra)/2
-
-        if neighrahigh is None:
-            raedgemax=2*np.pi
-        else:
-            raedgemax=(neighrahigh+pix_ra)/2
-
-        if neighdeclow is None:
-            decedgemin=-np.pi/2
-        else:
-            decedgemin=(neighdeclow+pix_dec)/2
-
-        if neighdechigh is None:
-            decedgemax=np.pi/2
-        else:
-            decedgemax=(neighdechigh+pix_dec)/2
-        return raedgemin, raedgemax, decedgemin, decedgemax
+        return higherra, lowerra, higherdec, lowerdec
 
     def PixtoSkyCoo(self, pixindex):
         zindex=self.PixIndextoZindex(pixindex)
@@ -715,7 +827,7 @@ class CatalogCompletion(object):
         zmin=max(chopix_z-self.deltaz/2, 0.)
         zmax=min(chopix_z+self.deltaz/2, self.zmax)       #don't want to go over the limits of the catalog. The redshift limit is hardcoded as a global variable
 
-        raedgemin, raedgemax, decedgemin, decedgemax = self.NewGetPixelEdges(pixindex)
+        raedgemax, raedgemin, decedgemax, decedgemin = self.GetPixelEdges(pixindex)
 
         ramin=max(self.minra, raedgemin)
         ramax=min(self.maxra, raedgemax)
@@ -749,78 +861,6 @@ class CatalogCompletion(object):
             m=1
 
         return ra, dec, z, m
-    
-    def PopulCatalogUniformH0ind(self, generatealsomagnitude=False):
-        zshell = ExtractZshellwithrates(zarray=self.z_hist_means, ratestimeszsquared=self.ratestimeszsquared)
-        zmin=self.z_hist_edges[zshell]
-        zmax=self.z_hist_edges[zshell+1]
-        z=Extractz(zmin, zmax)
-
-        ramin=self.minra
-        ramax=self.maxra
-        decmin=self.mindec
-        decmax=self.maxdec
-
-        if ramax>ramin and decmax>decmin and ramin>=self.minra and ramax<=self.maxra and decmin>=self.mindec and decmax<=self.maxdec: #silly check given the previous 4 lines, just to check everything is working properly
-            a=1
-        else:
-            print("ERROR")
-            print(ramin, ramax, decmin, decmax)
-            sys.exit(0)
-
-        ra, dec=ExtractSkyPos(ramin, ramax, decmin, decmax)    
-        
-        if generatealsomagnitude==True:
-            M=GenerateSchechterSamples(assumed_band=self.assumed_band, Nsamples=1, H0_true=self.H0_assumed)[0]
-            print(" Extracted M ", M)
-            if self.linear==True:
-                m=M+DistanceModulus(z*c/self.H0_assumed) 
-
-            elif self.linear==False:
-                m=M+DistanceModulus(ztoDFull(z, self.H0_assumed))
-        else:
-            m=1
-
-        return ra, dec, z, m
-
-    def PopulShellHealpyH0ind(self, zindex, generatealsomagnitude=False):
-        zshell=self.z_hist_means[zindex]
-        zmin=max(zshell-self.deltaz/2, 0.)
-        zmax=min(zshell+self.deltaz/2, self.zmax)       #don't want to go over the limits of the catalog. The redshift limit is hardcoded as a global variable
-
-        ramin=self.minra
-        ramax=self.maxra
-        decmin=self.mindec
-        decmax=self.maxdec
-
-        if ramax>ramin and decmax>decmin and ramin>=self.minra and ramax<=self.maxra and decmin>=self.mindec and decmax<=self.maxdec: #silly check given the previous 4 lines, just to check everything is working properly
-            a=1
-        else:
-            print("ERROR")
-            print(ramin, ramax, decmin, decmax)
-            sys.exit(0)
-
-        ra, dec=ExtractSkyPos(ramin, ramax, decmin, decmax)    
-        
-        z=Extractz(zmin, zmax) #extract z
-        
-        #original extracting from distribution found onine
-        #lum=simulate_schechter_distribution(alpha_ass, L_s, L_min, 1) #extract luminosity and convert it to magnitude #TODO introducing dependance on H0
-        #M=-5./2.*np.log10(lum)#/L0) #should be without division, but with division makes it right
-        #Extracting magnitudes from discretized pdf of the assumed schechter
-        if generatealsomagnitude==True:
-            M=GenerateSchechterSamples(assumed_band=self.assumed_band, Nsamples=1, H0_true=self.H0_assumed)[0]
-            print(" Extracted M ", M)
-            if self.linear==True:
-                m=M+DistanceModulus(z*c/self.H0_assumed) 
-
-            elif self.linear==False:
-                m=M+DistanceModulus(ztoDFull(z, self.H0_assumed))
-        else:
-            m=1
-
-        return ra, dec, z, m
-
 
     def ComputeClusteringProbabilityDifferencesforRecomputing(self, chopix_index):
         #finally, I have a new galaxy at the pix pix_chosen, so I increse the clustering probability of nearby pixels, which translates in an addition of
@@ -846,7 +886,7 @@ class CatalogCompletion(object):
             pix_recomp_zindex=self.PixIndextoZindex(ind)
             if self.NgalperRedshift[pix_recomp_zindex]>0.:#check if that pixel belongs to a shell that is already filled
                 #print("Is in a incomplete redshift shell")
-                sel_raedgemin, sel_raedgemax, sel_decedgemin, sel_decedgemax = self.NewGetPixelEdges(ind)#check if the pixel falls at least partly within the bounds of the catalog
+                sel_raedgemax, sel_raedgemin, sel_decedgemax, sel_decedgemin = self.GetPixelEdges(ind)#check if the pixel falls at least partly within the bounds of the catalog
                 if sel_raedgemax>self.minra and sel_raedgemin<self.maxra and sel_decedgemax>self.mindec and sel_decedgemin<self.maxdec:
                     #print("Lies at least partially within bounds")
                     r=distances[pix_i]
@@ -868,7 +908,7 @@ class CatalogCompletion(object):
         return IndsToBeUpdated, DiffProbstoupdate
 
 
-    def CorrectCatalogHealpyFixedNgal013(self, newname=None, givenactualcompleteness=None, recomputeProbsclust=False, dist_eval="binbin", readclustpfromfile=False, numberofgalsperpix="normal", renormrateasgals=False, Npointavaragelowcount=None, completeness_lowcount_tolerance=0.99, CatalogFullzs=None, puttinggalaxiesbyshell=True, startatzero=False, skipshellpixelizationforzerocorr=False):
+    def CorrectCatalogHealpyFixedNgal013(self, newname=None, givenactualcompleteness=None, recomputeProbsclust=False, dist_eval="binbin", readclustpfromfile=False, rateasnumberofgalsperpix=False, renormrateasgals=False, Npointavaragelowcount=None, completeness_lowcount_tolerance=0.99, CatalogFullzs=None, puttinggalaxiesbyshell=True, startatzero=False):
         #Numbering Conventions of Pixels: each redshift shell has a number of pixels = 12*(shell_index+1)**2 (first has 12, bla bla), and inside the shell, the numbering convention is the one of healpy
         #TODO Add check on inputs and force some parameters inputs (nothing assumed) like chice of correlation function
         # 
@@ -895,29 +935,57 @@ class CatalogCompletion(object):
             completeness=givenactualcompleteness
         else:
             self.zprior = redshift_prior(Omega_m=self.Omega_m, linear=self.linear)#TODO THIS ZPRIOR LIKE IN THE LIGO CASE IS TRICKY, MAYBE USE SPLINE INSTEAD FOR MICE? BUT IF USED ONLY FOR COMPLETENESS MAYBE IT"S OK
-            completeness=self.ComputeCompleteness(H0=self.H0_assumed)
-            print("Estimated completeness ", completeness*100, "%")
-
+            print(self.ComputeCompleteness(H0=self.H0_assumed))
+            completeness=round(100*self.ComputeCompleteness(H0=self.H0_assumed))/100 #TODO this is so that I'm closer because I use integers as completeness
+        
         targetnGal=round(self.nGal/completeness)
         print(targetnGal)
         NGalAdd=targetnGal-numgal_start
         
-        if numberofgalsperpix=="normal":
-            self.NgalperRedshift = self.AssignGalperRed(NGalAdd=NGalAdd, combine_zsquared=False)
-        if numberofgalsperpix=="poisson":
-            estimatedgalperRedshift = self.AssignGalperRed(NGalAdd=NGalAdd, combine_zsquared=False)
-            self.NgalperRedshift = self.PoissonAssignGalPerRedshift(estimatedgalnumber=estimatedgalperRedshift)
-        
-        self.pix_occup=self.BinningGalaxiesHealpy()
-        if skipshellpixelizationforzerocorr==False:
-            probs, probsnorm=self.AssignPixelProbs(startatzero=startatzero, numberofgalsperpix=numberofgalsperpix, readclustpfromfile=readclustpfromfile, savefile=True)
-        else:
-            probs=np.ones(self.totalPixelNumber)
-            probsnorm=np.ones(self.totalPixelNumber)
 
+        #These two ifs should be option that are not the main ones, skipped for now
         
-        print("Sum of non zero pixels before and after renorm (should be equal to actual pix count) ", sum(probs>0.), sum(probsnorm>0.))
+        if rateasnumberofgalsperpix==True:
+            self.NgalperRedshift, self.NgalperRedshiftnotnorm = self.AssignGalperRed(NGalAdd=NGalAdd, renorm=renormrateasgals, combine_zsquared=False)
+            #plt.plot(self.z_hist_means, NgalperRedshift+self.z_hist_count, label="Corrected")
+            #plt.hist(self.z_hist_count, bins=self.z_hist_edges, label="Cut", alpha=0.4)
+            #plt.hist(CatalogFullzs, bins=self.z_hist_edges, label="Full", alpha=0.4)
+            #plt.legend()
+            #plt.savefig("CorrectedCatalogs/ComparisonZsBeforePopulatingTESTLOWRESOLCORR.png")
+            #plt.show()
+            #plt.close()
+            #sys.exit()
+        if renormrateasgals==False:
+            self.NgalperRedshift=self.NgalperRedshiftnotnorm
+            NGalAdd=sum(self.NgalperRedshift)
+        
+        self.pix_occup, probsnew = self.BinningGalaxiesandAssignProbs(startatzero=False)
+        sys.exit()
+        self.pix_occup=self.BinningGalaxiesHealpy()
+        
+        
+        #compute probs
+        t1=time.perf_counter()
+        probsold=self.AssignPixelProbs(startatzero=startatzero, rateasnumberofgalsperpix=rateasnumberofgalsperpix, readclustpfromfile=readclustpfromfile, savefile=True)
+        print("Time for computing all probs ", time.perf_counter()-t1)
+        
+        probsdiff=probsnew-probsold
+        print("Sum probsold ", sum(probsold))
+        print("Sum probsnew ", sum(probsnew))
+        print("Sum difference ", sum(probsdiff))
+        print("A couple of random samples of probs :")
+        nonzeroinds=np.where(probsold>0.)[0]
+        print(probsold[nonzeroinds[10]], probsold[nonzeroinds[10]])
+        print(probsold[nonzeroinds[20]], probsold[nonzeroinds[20]])
+        print(probsold[nonzeroinds[30]], probsold[nonzeroinds[30]])
+        sys.exit()
+
+
+
+        print("starting sum ", summ)
+        
         print("Populating")
+        print("Sum of non zero pixels before and after renorm (should be equal to actual pix count) ", sum(probs>0.), sum(probsnorm>0.))
         count=0
         tpop=time.perf_counter()        
 
@@ -929,21 +997,8 @@ class CatalogCompletion(object):
         newms=list(self.allm)
 
         pixelchoices=[]
-
-        if skipshellpixelizationforzerocorr==True:
-            print("Populating whole catalog, this only doable without clustering and useful for LIGO comparison!")
-            ratestimeszsquaredtobenormed=[self.redshiftrates[i]*self.z_hist_means[i]**2 for i in range(len(self.z_hist_means))]
-            self.ratestimeszsquared=ratestimeszsquaredtobenormed/sum(ratestimeszsquaredtobenormed)
-
-            for i in range(NGalAdd):
-                newra, newdec, newz, newm = self.PopulCatalogUniformH0ind(generatealsomagnitude=False)
-                newras.append(newra)
-                newdecs.append(newdec)
-                newzs.append(newz)
-                newms.append(newm)
-
-        elif puttinggalaxiesbyshell==True:
-            if numberofgalsperpix!="weight":
+        if puttinggalaxiesbyshell==True:
+            if rateasnumberofgalsperpix==True:
                 for m in range(len(self.z_hist_means)):
                     NGalAddShell=int(self.NgalperRedshift[m])
                     print("Shell ", m, ", NGalAddShell ", NGalAddShell)
@@ -960,7 +1015,8 @@ class CatalogCompletion(object):
                             shellindex=np.random.choice(a=len(shellprobsnorm), p=shellprobsnorm)
                             index=shellindex+startindex #Reconvert to global index for populpixel func
                             pixelchoices.append(index)
-                            newra, newdec, newz, newm = self.PopulPixelHealpyH0ind(pixindex=index, generatealsomagnitude=False) #place a galaxy in that pixel #TODO NEED TO MODIFY THIS with new pixels, also think about how to handle boundaries    
+                            newra, newdec, newz, newm = self.PopulPixelHealpyH0ind(index, generatealsomagnitude=False) #place a galaxy in that pixel #TODO NEED TO MODIFY THIS with new pixels, also think about how to handle boundaries
+                            
                             newras.append(newra)
                             newdecs.append(newdec)
                             newzs.append(newz)
@@ -990,7 +1046,7 @@ class CatalogCompletion(object):
 
                 zindex=self.PixIndextoZindex(index)
                     
-                if numberofgalsperpix!="weight":
+                if rateasnumberofgalsperpix==True:
                     self.NgalperRedshift[zindex]=self.NgalperRedshift[zindex]-1
                     if self.NgalperRedshift[zindex]<=0:
                         pixtozerobase=self.zindextoBasePix(zindex)
